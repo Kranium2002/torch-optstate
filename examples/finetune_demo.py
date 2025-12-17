@@ -116,7 +116,13 @@ def train_model(optimizer_factory, device, epochs=1, batch_size=16, max_steps=No
     model.train()
 
     tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
-    dataset = get_data(tokenizer, num_samples=100) # Small subset for demo speed
+    
+    # Ensure we have enough data for the requested steps
+    needed_samples = (max_steps * batch_size) if max_steps else 500
+    # Add a buffer
+    needed_samples += batch_size 
+    
+    dataset = get_data(tokenizer, num_samples=needed_samples) 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     # Create optimizer
