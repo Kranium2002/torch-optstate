@@ -145,13 +145,8 @@ class OptimizerWrapper(Optimizer):
             'materialize': t2 - t1,
             'step': t3 - t2,
             'commit': t4 - t3,
-            'overhead': (t1 - t0) + (t4 - t0) - (t4 - t1) # Rough overhead
+            'overhead': (t4 - t0) - ((t2 - t1) + (t3 - t2) + (t4 - t3))
         }
-
-        return loss
-                    
-        # 7. Clear optimizer state to free memory
-        self.optimizer.state.clear()
 
         return loss
 
@@ -294,9 +289,6 @@ class OptimizerWrapper(Optimizer):
             self.store.commit(pid, state, codecs)
             
         self.optimizer.state.clear()
-
-    def add_param_group(self, param_group: Dict[str, Any]):
-        self.optimizer.add_param_group(param_group)
 
     def __repr__(self):
         return f"OptimizerWrapper({repr(self.optimizer)})"
