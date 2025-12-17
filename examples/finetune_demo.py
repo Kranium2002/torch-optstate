@@ -147,6 +147,11 @@ def train_model(optimizer_factory, device, epochs=1, batch_size=16, max_steps=No
             t1_step = time.perf_counter()
             step_dt = t1_step - t0_step
             
+            # Force GC to verify if memory growth is real or just lazy GC
+            gc.collect()
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+
             tracker.record()
             
             # Track tensor memory specifically
