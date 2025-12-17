@@ -2,9 +2,10 @@ import torch
 from .base import Codec
 from typing import Any
 
-class FP32Codec(Codec):
+class CPUOffloadCodec(Codec):
     """
-    Baseline codec that stores tensors in FP32 (no compression).
+    Codec that stores tensors in FP32 on CPU.
+    This is the default behavior for "FP32" in this library (offloading).
     """
     def encode(self, tensor: torch.Tensor) -> torch.Tensor:
         # Ensure we store on CPU to save GPU memory
@@ -17,3 +18,25 @@ class FP32Codec(Codec):
 
     def bytes(self, packed: torch.Tensor) -> int:
         return packed.element_size() * packed.numel()
+
+class IdentityCodec(Codec):
+    """
+    Codec that does nothing (no compression, no offloading).
+    Keeps tensor on original device and dtype.
+    """
+    def encode(self, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor
+
+    def decode(self, packed: torch.Tensor, device: torch.device = None) -> torch.Tensor:
+        # We ignore device here because we want to keep it where it is?
+        # Or should we respect the requested device?
+        # If the user asks to materialize on GPU, we should probably ensure it's there.
+        if device is not None:
+            return packed.to(device)
+        return packed
+
+    def bytes(self, packed: torch.Tensor) -> int:
+        return packed.element_size() * packed.numel()
+
+# Alias for backward compatibility, but deprecated in spirit
+FP32Codec = CPUOffloadCodec

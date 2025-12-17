@@ -18,13 +18,26 @@ except:
 def _int8_encode(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     # Calculate scale
     abs_max = tensor.abs().max()
+    
+    # Clamp to avoid inf/nan issues
+    if not torch.isfinite(abs_max):
+        # Fallback or handle? For now, just clamp to a large number to avoid crash, 
+        # but data is already corrupted if we have inf.
+        # Ideally we should probably not quantize if inf, but we are inside a compiled function.
+        abs_max = torch.nan_to_num(abs_max, nan=0.0, posinf=1e6, neginf=-1e6)
+
     scale = abs_max / 127.0
     
     # Handle zero case to avoid division by zero or useless scaling
-    scale = torch.where(scale == 0, torch.tensor(1.0, device=tensor.device, dtype=tensor.dtype), scale)
+    # Use a scalar float for 1.0 to avoid tensor creation overhead in graph
+    scale = torch.where(scale == 0, 1.0, scale)
     
     # Quantize
     quantized = (tensor / scale).round().clamp(-127, 127).to(torch.int8)
+    
+    # Ensure scale is on CPU and FP32 for stability/storage
+    # But we can't move it here if we want to keep this function compilable/device-agnostic?
+    # The caller can move it.
     
     return (quantized, scale)
 

@@ -1,5 +1,5 @@
 import torch
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 from ..codecs import Codec, FP32Codec
 
 class StateStore:
@@ -14,44 +14,41 @@ class StateStore:
         #     state_key: (codec, packed_data)
         #   }
         # }
-        # We use id(param) as key because params are hashable but we want to be sure.
-        # Actually, weakref might be better, but for now let's use id(param) or the param itself if it's hashable.
-        # PyTorch params are hashable.
-        self._store: Dict[torch.Tensor, Dict[str, Any]] = {}
+        # We use stable IDs (int) as keys to ensure robustness across serialization.
+        self._store: Dict[int, Dict[str, Any]] = {}
         self._total_bytes = 0
 
-    def materialize(self, param: torch.Tensor) -> Dict[str, Any]:
+    def materialize(self, param_id: int, target_device: torch.device) -> Dict[str, Any]:
         """
         Retrieves the full-precision state dictionary for a parameter.
         Decompresses any compressed state.
         """
-        if param not in self._store:
+        if param_id not in self._store:
             return {}
 
         state_dict = {}
-        for key, (codec, packed) in self._store[param].items():
+        for key, (codec, packed) in self._store[param_id].items():
             if isinstance(codec, Codec):
-                state_dict[key] = codec.decode(packed, device=param.device)
+                state_dict[key] = codec.decode(packed, device=target_device)
             else:
                 # Fallback for non-tensor state (e.g. step number)
                 state_dict[key] = packed
         return state_dict
 
-    def materialize_batch(self, params: list[torch.Tensor]) -> list[Dict[str, Any]]:
+    def materialize_batch(self, param_ids: list[int], target_devices: list[torch.device]) -> list[Dict[str, Any]]:
         """
         Batch version of materialize.
         """
-        results = [{} for _ in params]
+        results = [{} for _ in param_ids]
         
         # Group tasks: (codec, device) -> (list of packed_data, list of (param_idx, key))
         tasks = {} 
         
-        for i, param in enumerate(params):
-            if param not in self._store:
+        for i, (pid, device) in enumerate(zip(param_ids, target_devices)):
+            if pid not in self._store:
                 continue
             
-            device = param.device
-            for key, (codec, packed) in self._store[param].items():
+            for key, (codec, packed) in self._store[pid].items():
                 if isinstance(codec, Codec):
                     task_key = (codec, device)
                     if task_key not in tasks:
@@ -70,13 +67,13 @@ class StateStore:
                 
         return results
 
-    def commit(self, param: torch.Tensor, state: Dict[str, Any], codecs: Dict[str, Codec]):
+    def commit(self, param_id: int, state: Dict[str, Any], codecs: Dict[str, Codec]):
         """
         Compresses and stores the state dictionary for a parameter.
         """
-        self.commit_batch([param], [state], [codecs])
+        self.commit_batch([param_id], [state], [codecs])
 
-    def commit_batch(self, params: list[torch.Tensor], states: list[Dict[str, Any]], codecs_list: list[Dict[str, Codec]]):
+    def commit_batch(self, param_ids: list[int], states: list[Dict[str, Any]], codecs_list: list[Dict[str, Codec]]):
         """
         Batch version of commit.
         """
@@ -87,12 +84,12 @@ class StateStore:
         if not hasattr(self, '_default_fp32'):
             self._default_fp32 = FP32Codec()
         
-        for i, (param, state, codecs) in enumerate(zip(params, states, codecs_list)):
+        for i, (pid, state, codecs) in enumerate(zip(param_ids, states, codecs_list)):
             # Cleanup old bytes
-            self._remove_bytes(param)
+            self._remove_bytes(pid)
             
             new_param_store = {}
-            self._store[param] = new_param_store
+            self._store[pid] = new_param_store
             
             for key, value in state.items():
                 codec = None
@@ -116,15 +113,15 @@ class StateStore:
         for codec, (tensor_list, indices) in tasks.items():
             packed_list = codec.batch_encode(tensor_list)
             for packed, (idx, key) in zip(packed_list, indices):
-                param = params[idx]
-                self._store[param][key] = (codec, packed)
+                pid = param_ids[idx]
+                self._store[pid][key] = (codec, packed)
                 self._total_bytes += codec.bytes(packed)
 
-    def _remove_bytes(self, param: torch.Tensor):
-        if param not in self._store:
+    def _remove_bytes(self, param_id: int):
+        if param_id not in self._store:
             return
         
-        for key, (codec, packed) in self._store[param].items():
+        for key, (codec, packed) in self._store[param_id].items():
             if codec is not None:
                 self._total_bytes -= codec.bytes(packed)
             elif isinstance(packed, (int, float)):

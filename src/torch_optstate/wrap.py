@@ -1,4 +1,5 @@
 import torch
+import time
 from torch.optim import Optimizer
 from typing import Optional, Dict, Any, Callable
 from .core.state_store import StateStore
@@ -23,6 +24,12 @@ class OptimizerWrapper(Optimizer):
         self.defaults = self.optimizer.defaults
         self._global_step = 0
         
+        # Performance stats
+        self.last_step_timings = {}
+        
+        # Initialize param mapping
+        self._update_param_mapping()
+        
         # Initialize state as empty, we will manage it via store
         # But we need to sync with existing state if any
         if self.optimizer.state:
@@ -34,10 +41,27 @@ class OptimizerWrapper(Optimizer):
                      step = step.item()
                 
                 codecs = self.policy.get_codecs(param, state, step)
-                self.store.commit(param, state, codecs)
+                pid = self.param_to_id[param]
+                self.store.commit(pid, state, codecs)
             
             # Clear original state to save memory
             self.optimizer.state.clear()
+
+    def _update_param_mapping(self):
+        """
+        Updates the mapping from parameter objects to stable IDs.
+        IDs are assigned sequentially based on group order and parameter order within groups.
+        """
+        self.param_to_id = {}
+        idx = 0
+        for group in self.param_groups:
+            for p in group['params']:
+                self.param_to_id[p] = idx
+                idx += 1
+
+    def add_param_group(self, param_group: Dict[str, Any]):
+        self.optimizer.add_param_group(param_group)
+        self._update_param_mapping()
 
     @property
     def state(self):
@@ -53,26 +77,39 @@ class OptimizerWrapper(Optimizer):
         if self.chunk_size is not None and closure is None:
             return self._step_chunked()
         
+        t0 = time.perf_counter()
+        
         # 1. Collect all params
         all_params = []
+        all_pids = []
+        all_devices = []
         for group in self.param_groups:
-            all_params.extend(group['params'])
+            for p in group['params']:
+                all_params.append(p)
+                all_pids.append(self.param_to_id[p])
+                all_devices.append(p.device)
+
+        t1 = time.perf_counter()
 
         # 2. Materialize all at once
         # This allows the store to batch decompressions
-        states = self.store.materialize_batch(all_params)
+        states = self.store.materialize_batch(all_pids, all_devices)
         
         # 3. Populate optimizer.state
         for param, state in zip(all_params, states):
             if state: # Only if we had state
                 self.optimizer.state[param] = state
 
+        t2 = time.perf_counter()
+
         # 4. Perform the step
         loss = self.optimizer.step(closure)
         self._global_step += 1
 
+        t3 = time.perf_counter()
+
         # 5. Collect new states and codecs for batch commit
-        params_to_commit = []
+        pids_to_commit = []
         states_to_commit = []
         codecs_list = []
 
@@ -90,14 +127,28 @@ class OptimizerWrapper(Optimizer):
                     # Get codecs from policy
                     codecs = self.policy.get_codecs(p, state, step)
                     
-                    params_to_commit.append(p)
+                    pids_to_commit.append(self.param_to_id[p])
                     states_to_commit.append(state)
                     codecs_list.append(codecs)
                     
         # 6. Commit batch
         # This allows the store to batch compressions
-        if params_to_commit:
-            self.store.commit_batch(params_to_commit, states_to_commit, codecs_list)
+        if pids_to_commit:
+            self.store.commit_batch(pids_to_commit, states_to_commit, codecs_list)
+                    
+        # 7. Clear optimizer state to free memory
+        self.optimizer.state.clear()
+
+        t4 = time.perf_counter()
+        
+        self.last_step_timings = {
+            'materialize': t2 - t1,
+            'step': t3 - t2,
+            'commit': t4 - t3,
+            'overhead': (t1 - t0) + (t4 - t0) - (t4 - t1) # Rough overhead
+        }
+
+        return loss
                     
         # 7. Clear optimizer state to free memory
         self.optimizer.state.clear()
@@ -109,65 +160,88 @@ class OptimizerWrapper(Optimizer):
         Performs the step in chunks to minimize peak memory usage.
         This is only possible if no closure is provided.
         """
-        # Backup original param groups
-        original_param_groups = self.optimizer.param_groups
+        total_materialize = 0.0
+        total_step = 0.0
+        total_commit = 0.0
         
-        # We need to iterate over groups and chunk them
-        # We can't easily chunk across groups because optimizers expect specific group options
+        # 1. Backup all params
+        all_original_params = [g['params'] for g in self.optimizer.param_groups]
         
-        for group_idx, group in enumerate(original_param_groups):
-            params = group['params']
+        # 2. Empty all groups
+        for g in self.optimizer.param_groups:
+            g['params'] = []
             
-            # Process in chunks
-            for i in range(0, len(params), self.chunk_size):
-                chunk_params = params[i : i + self.chunk_size]
+        # 3. Iterate and chunk
+        for group_idx, group in enumerate(self.optimizer.param_groups):
+            original_params = all_original_params[group_idx]
+            
+            for i in range(0, len(original_params), self.chunk_size):
+                chunk_params = original_params[i : i + self.chunk_size]
                 
-                # 1. Materialize chunk
-                states = self.store.materialize_batch(chunk_params)
+                t1 = time.perf_counter()
+                
+                # Materialize
+                chunk_pids = [self.param_to_id[p] for p in chunk_params]
+                chunk_devices = [p.device for p in chunk_params]
+                states = self.store.materialize_batch(chunk_pids, chunk_devices)
+                
                 for param, state in zip(chunk_params, states):
                     if state:
                         self.optimizer.state[param] = state
                 
-                # 2. Create temporary group for this chunk
-                # We copy the group dict but replace params
-                temp_group = group.copy()
-                temp_group['params'] = chunk_params
+                t2 = time.perf_counter()
+                total_materialize += (t2 - t1)
                 
-                # 3. Inject into optimizer
-                # We only provide this single group to the optimizer
-                self.optimizer.param_groups = [temp_group]
+                # Set params for this group
+                group['params'] = chunk_params
                 
-                # 4. Step
+                # Step
                 self.optimizer.step()
                 
-                # 5. Commit chunk
-                params_to_commit = []
+                t3 = time.perf_counter()
+                total_step += (t3 - t2)
+                
+                # Commit
+                pids_to_commit = []
                 states_to_commit = []
                 codecs_list = []
                 
                 for p in chunk_params:
                     if p in self.optimizer.state:
                         state = self.optimizer.state[p]
-                        
                         step = state.get('step', self._global_step)
                         if torch.is_tensor(step):
                             step = step.item()
-                        
                         codecs = self.policy.get_codecs(p, state, step)
-                        
-                        params_to_commit.append(p)
+                        pids_to_commit.append(self.param_to_id[p])
                         states_to_commit.append(state)
                         codecs_list.append(codecs)
                 
-                if params_to_commit:
-                    self.store.commit_batch(params_to_commit, states_to_commit, codecs_list)
+                if pids_to_commit:
+                    self.store.commit_batch(pids_to_commit, states_to_commit, codecs_list)
                 
-                # 6. Clear state
                 self.optimizer.state.clear()
-        
-        # Restore original groups
-        self.optimizer.param_groups = original_param_groups
+                
+                t4 = time.perf_counter()
+                total_commit += (t4 - t3)
+                
+            # Restore params for this group (though we empty it again in next loop? No, we empty all at start)
+            # We can leave it empty for now and restore all at end.
+            group['params'] = []
+
+        # 4. Restore all
+        for group_idx, group in enumerate(self.optimizer.param_groups):
+            group['params'] = all_original_params[group_idx]
+            
         self._global_step += 1
+        
+        self.last_step_timings = {
+            'materialize': total_materialize,
+            'step': total_step,
+            'commit': total_commit,
+            'overhead': 0.0 
+        }
+        
         return None
 
     def zero_grad(self, set_to_none: bool = True):
@@ -180,8 +254,19 @@ class OptimizerWrapper(Optimizer):
         # Save current state of optimizer.state (should be empty)
         original_state = self.optimizer.state.copy()
         
-        for param in self.store._store:
-            self.optimizer.state[param] = self.store.materialize(param)
+        # We need to map IDs back to params to populate optimizer.state
+        # But wait, StateStore uses IDs now.
+        # And optimizer.state uses params.
+        # We need to iterate over our params and materialize.
+        
+        # Also, we want to materialize on CPU for state_dict to avoid GPU OOM.
+        cpu_device = torch.device('cpu')
+        
+        for group in self.param_groups:
+            for p in group['params']:
+                pid = self.param_to_id[p]
+                if pid in self.store._store:
+                    self.optimizer.state[p] = self.store.materialize(pid, target_device=cpu_device)
             
         # Get state dict
         sd = self.optimizer.state_dict()
@@ -205,7 +290,8 @@ class OptimizerWrapper(Optimizer):
             if torch.is_tensor(step):
                 step = step.item()
             codecs = self.policy.get_codecs(param, state, step)
-            self.store.commit(param, state, codecs)
+            pid = self.param_to_id[param]
+            self.store.commit(pid, state, codecs)
             
         self.optimizer.state.clear()
 
