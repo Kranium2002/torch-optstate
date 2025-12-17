@@ -73,3 +73,7 @@ class Int8MomentumCodec(Codec):
             quantized = quantized.to(device)
             scale = scale.to(device)
         return _int8_decode(quantized, scale)
+
+    def bytes(self, packed: Tuple[torch.Tensor, torch.Tensor]) -> int:
+        quantized, scale = packed
+        return (quantized.element_size() * quantized.numel()) + (scale.element_size() * scale.numel())
