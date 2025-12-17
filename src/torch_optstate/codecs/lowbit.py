@@ -1,10 +1,13 @@
 import torch
+import os
 from .base import Codec
 from typing import Any, Tuple
 
 # Try to get compile
+# On Windows, torch.compile (Inductor) often requires Triton which isn't standard.
+# We'll skip compilation on Windows to avoid "TritonMissing" errors.
 try:
-    if hasattr(torch, 'compile'):
+    if hasattr(torch, 'compile') and os.name != 'nt':
         compile_fn = torch.compile
     else:
         def compile_fn(x): return x
