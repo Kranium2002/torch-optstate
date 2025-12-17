@@ -77,7 +77,7 @@ def run_benchmark():
         devices.append('cuda')
         
     sizes = ['small', 'medium'] 
-    optimizers = ['adamw']
+    optimizers = ['adamw', 'sgd']
     policies = ['baseline', 'fp32', 'int8', 'int8_all']
     chunk_sizes = [None, 1024, 256, 64, 1] 
     
@@ -104,13 +104,17 @@ def run_benchmark():
                         if policy_name == 'baseline':
                             wrapper = opt
                         else:
+                            momentum_key = 'exp_avg'
+                            if opt_name == 'sgd':
+                                momentum_key = 'momentum_buffer'
+
                             if policy_name == 'fp32':
                                 # Ensure it stays in FP32 for the duration of the benchmark
-                                policy = WarmupPolicy(warmup_steps=1000000) 
+                                policy = WarmupPolicy(warmup_steps=1000000, momentum_key=momentum_key) 
                             elif policy_name == 'int8':
-                                policy = WarmupPolicy(warmup_steps=0) # Immediate Int8
+                                policy = WarmupPolicy(warmup_steps=0, momentum_key=momentum_key) # Immediate Int8
                             elif policy_name == 'int8_all':
-                                policy = WarmupPolicy(warmup_steps=0, variance_codec=Int8MomentumCodec())
+                                policy = WarmupPolicy(warmup_steps=0, momentum_key=momentum_key, variance_codec=Int8MomentumCodec())
                             
                             # Wrap
                             wrapper = wrap(opt, policy=policy, chunk_size=chunk_size)
@@ -262,6 +266,9 @@ def run_benchmark():
                         results.append(res)
                         print(f"Finished {res}")
                         
+                        # Save incrementally so we don't lose data on crash/interrupt
+                        pd.DataFrame(results).to_csv('benchmark_results.csv', index=False)
+                        
                         # Cleanup
                         del model, opt, wrapper, x, y
                         reset_memory(device)
@@ -270,7 +277,7 @@ def run_benchmark():
     print("\nBenchmark Results:")
     print(df.to_string(index=False, float_format="%.2f"))
     
-    df.to_csv('benchmark_results.csv', index=False)
+    print(f"\nSaved final results to benchmark_results.csv")
 
 if __name__ == "__main__":
     run_benchmark()
