@@ -102,7 +102,8 @@ def run_benchmark():
                             wrapper = opt
                         else:
                             if policy_name == 'fp32':
-                                policy = None # Default Warmup (FP32 offload)
+                                # Ensure it stays in FP32 for the duration of the benchmark
+                                policy = WarmupPolicy(warmup_steps=1000000) 
                             elif policy_name == 'int8':
                                 policy = WarmupPolicy(warmup_steps=0) # Immediate Int8
                             
@@ -129,7 +130,13 @@ def run_benchmark():
                         # Measure
                         print(f"  Measuring...")
                         reset_memory(device)
-                        start_mem = measure_peak_memory(device)
+                        
+                        # CPU RSS tracking
+                        process = psutil.Process(os.getpid())
+                        peak_rss = process.memory_info().rss
+                        
+                        if device.type == 'cuda':
+                            torch.cuda.synchronize()
                         
                         t0 = time.perf_counter()
                         steps = 10
@@ -139,18 +146,33 @@ def run_benchmark():
                                 loss = model(x).sum()
                                 loss.backward()
                                 wrapper.step()
+                                
+                                # Sample RSS
+                                current_rss = process.memory_info().rss
+                                if current_rss > peak_rss:
+                                    peak_rss = current_rss
                         except Exception as e:
                             print(f"  Failed during measurement: {e}")
                             continue
+                            
+                        if device.type == 'cuda':
+                            torch.cuda.synchronize()
+                            
                         t1 = time.perf_counter()
                         
-                        peak_mem = measure_peak_memory(device)
+                        # Metrics
+                        rss_peak_mb = peak_rss / 1024**2
+                        rss_end_mb = process.memory_info().rss / 1024**2
                         
+                        cuda_peak_allocated_mb = 0
+                        cuda_peak_reserved_mb = 0
                         if device.type == 'cuda':
-                            mem_usage = peak_mem - start_mem
-                        else:
-                            # For CPU RSS, it's noisy. We take the diff.
-                            mem_usage = peak_mem - start_mem
+                            cuda_peak_allocated_mb = torch.cuda.max_memory_allocated(device) / 1024**2
+                            cuda_peak_reserved_mb = torch.cuda.max_memory_reserved(device) / 1024**2
+                            
+                        store_mb = 0
+                        if hasattr(wrapper, 'store'):
+                             store_mb = wrapper.store.get_memory_usage() / 1024**2
                         
                         avg_time = (t1 - t0) / steps
                         
@@ -169,7 +191,11 @@ def run_benchmark():
                             'policy': policy_name,
                             'chunk': str(chunk_size),
                             'theo_mb': theo_mem,
-                            'mem_mb': mem_usage / 1024**2,
+                            'rss_peak_mb': rss_peak_mb,
+                            'rss_end_mb': rss_end_mb,
+                            'cuda_alloc_mb': cuda_peak_allocated_mb,
+                            'cuda_res_mb': cuda_peak_reserved_mb,
+                            'store_mb': store_mb,
                             'time_ms': avg_time * 1000,
                             'mat_ms': timings.get('materialize', 0) * 1000,
                             'step_ms': timings.get('step', 0) * 1000,
