@@ -34,7 +34,11 @@ class WarmupPolicy(Policy):
             if self.momentum_key in state:
                 codecs[self.momentum_key] = self.int8_codec
             
+            # Also check for 'momentum_buffer' which is used by SGD
+            if 'momentum_buffer' in state:
+                codecs['momentum_buffer'] = self.int8_codec
+            
             if self.variance_key in state:
                 codecs[self.variance_key] = self.variance_codec
-            
+        
         return codecs

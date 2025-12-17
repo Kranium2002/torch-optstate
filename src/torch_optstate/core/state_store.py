@@ -93,7 +93,7 @@ class StateStore:
             
             for key, value in state.items():
                 codec = None
-                if key in codecs:
+                if codecs and key in codecs:
                     codec = codecs[key]
                 elif torch.is_tensor(value):
                     codec = self._default_fp32
