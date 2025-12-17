@@ -69,6 +69,24 @@ def benchmark_optimizer(optimizer_name, steps=100, hidden_dim=1024, layers=4):
             
         policy = WarmupPolicy(warmup_steps=10, momentum_key=momentum_key, variance_key=variance_key)
         opt = wrap(base_opt_cls(model.parameters(), **kwargs), policy=policy)
+    elif "Wrapped Chunked" in optimizer_name:
+        # Chunked update for low peak memory
+        momentum_key = 'exp_avg'
+        variance_key = 'exp_avg_sq'
+        
+        if "SGD" in optimizer_name:
+            momentum_key = 'momentum_buffer'
+            variance_key = 'unused'
+        elif "RMSprop" in optimizer_name:
+            momentum_key = 'momentum_buffer'
+            variance_key = 'square_avg'
+        elif "Adagrad" in optimizer_name:
+            momentum_key = 'unused'
+            variance_key = 'sum'
+            
+        policy = WarmupPolicy(warmup_steps=10, momentum_key=momentum_key, variance_key=variance_key)
+        # Chunk size 1 means process 1 param at a time (lowest memory)
+        opt = wrap(base_opt_cls(model.parameters(), **kwargs), policy=policy, chunk_size=1)
     
     # Warmup
     for _ in range(5):
@@ -120,14 +138,17 @@ if __name__ == "__main__":
     benchmark_optimizer("AdamW (Baseline)")
     benchmark_optimizer("AdamW (Wrapped FP32)")
     benchmark_optimizer("AdamW (Wrapped Compressed)")
+    benchmark_optimizer("AdamW (Wrapped Chunked)")
     
     # SGD
     benchmark_optimizer("SGD (Baseline)")
     benchmark_optimizer("SGD (Wrapped FP32)")
     benchmark_optimizer("SGD (Wrapped Compressed)")
+    benchmark_optimizer("SGD (Wrapped Chunked)")
 
     # RMSprop
     benchmark_optimizer("RMSprop (Baseline)")
     benchmark_optimizer("RMSprop (Wrapped FP32)")
     benchmark_optimizer("RMSprop (Wrapped Compressed)")
+    benchmark_optimizer("RMSprop (Wrapped Chunked)")
 

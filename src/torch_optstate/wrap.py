@@ -10,10 +10,11 @@ class OptimizerWrapper(Optimizer):
     Wrapper around a PyTorch optimizer that virtualizes its state.
     State is compressed and stored in a StateStore when not in use (i.e. outside of step()).
     """
-    def __init__(self, optimizer: Optimizer, policy: Optional[Policy] = None):
+    def __init__(self, optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Optional[int] = None):
         self.optimizer = optimizer
         self.policy = policy or WarmupPolicy()
         self.store = StateStore()
+        self.chunk_size = chunk_size
         
         # We don't call super().__init__ because we are proxying.
         # But we need to look like an Optimizer.
@@ -49,6 +50,9 @@ class OptimizerWrapper(Optimizer):
         return self.optimizer.state
 
     def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]:
+        if self.chunk_size is not None and closure is None:
+            return self._step_chunked()
+        
         # 1. Collect all params
         all_params = []
         for group in self.param_groups:
@@ -100,6 +104,72 @@ class OptimizerWrapper(Optimizer):
 
         return loss
 
+    def _step_chunked(self):
+        """
+        Performs the step in chunks to minimize peak memory usage.
+        This is only possible if no closure is provided.
+        """
+        # Backup original param groups
+        original_param_groups = self.optimizer.param_groups
+        
+        # We need to iterate over groups and chunk them
+        # We can't easily chunk across groups because optimizers expect specific group options
+        
+        for group_idx, group in enumerate(original_param_groups):
+            params = group['params']
+            
+            # Process in chunks
+            for i in range(0, len(params), self.chunk_size):
+                chunk_params = params[i : i + self.chunk_size]
+                
+                # 1. Materialize chunk
+                states = self.store.materialize_batch(chunk_params)
+                for param, state in zip(chunk_params, states):
+                    if state:
+                        self.optimizer.state[param] = state
+                
+                # 2. Create temporary group for this chunk
+                # We copy the group dict but replace params
+                temp_group = group.copy()
+                temp_group['params'] = chunk_params
+                
+                # 3. Inject into optimizer
+                # We only provide this single group to the optimizer
+                self.optimizer.param_groups = [temp_group]
+                
+                # 4. Step
+                self.optimizer.step()
+                
+                # 5. Commit chunk
+                params_to_commit = []
+                states_to_commit = []
+                codecs_list = []
+                
+                for p in chunk_params:
+                    if p in self.optimizer.state:
+                        state = self.optimizer.state[p]
+                        
+                        step = state.get('step', self._global_step)
+                        if torch.is_tensor(step):
+                            step = step.item()
+                        
+                        codecs = self.policy.get_codecs(p, state, step)
+                        
+                        params_to_commit.append(p)
+                        states_to_commit.append(state)
+                        codecs_list.append(codecs)
+                
+                if params_to_commit:
+                    self.store.commit_batch(params_to_commit, states_to_commit, codecs_list)
+                
+                # 6. Clear state
+                self.optimizer.state.clear()
+        
+        # Restore original groups
+        self.optimizer.param_groups = original_param_groups
+        self._global_step += 1
+        return None
+
     def zero_grad(self, set_to_none: bool = True):
         self.optimizer.zero_grad(set_to_none=set_to_none)
 
@@ -148,15 +218,16 @@ class OptimizerWrapper(Optimizer):
     def __getattr__(self, name):
         return getattr(self.optimizer, name)
 
-def wrap(optimizer: Optimizer, policy: Optional[Policy] = None) -> OptimizerWrapper:
+def wrap(optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Optional[int] = None) -> OptimizerWrapper:
     """
     Wraps an existing PyTorch optimizer with state virtualization.
     
     Args:
         optimizer: The optimizer to wrap.
         policy: The policy to use for state compression.
+        chunk_size: If set, performs step() in chunks of this size to reduce peak memory.
     
     Returns:
         An OptimizerWrapper instance.
     """
-    return OptimizerWrapper(optimizer, policy)
+    return OptimizerWrapper(optimizer, policy, chunk_size)

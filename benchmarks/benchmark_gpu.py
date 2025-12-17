@@ -84,6 +84,24 @@ def benchmark_optimizer_gpu(optimizer_name, steps=100, hidden_dim=4096, layers=4
             
         policy = WarmupPolicy(warmup_steps=10, momentum_key=momentum_key, variance_key=variance_key)
         opt = wrap(base_opt_cls(model.parameters(), **kwargs), policy=policy)
+    elif "Wrapped Chunked" in optimizer_name:
+        # Chunked update for low peak memory
+        momentum_key = 'exp_avg'
+        variance_key = 'exp_avg_sq'
+        
+        if "SGD" in optimizer_name:
+            momentum_key = 'momentum_buffer'
+            variance_key = 'unused'
+        elif "RMSprop" in optimizer_name:
+            momentum_key = 'momentum_buffer'
+            variance_key = 'square_avg'
+        elif "Adagrad" in optimizer_name:
+            momentum_key = 'unused'
+            variance_key = 'sum'
+            
+        policy = WarmupPolicy(warmup_steps=10, momentum_key=momentum_key, variance_key=variance_key)
+        # Chunk size 1 means process 1 param at a time (lowest memory)
+        opt = wrap(base_opt_cls(model.parameters(), **kwargs), policy=policy, chunk_size=1)
     
     # Warmup
     for _ in range(5):
@@ -104,7 +122,16 @@ def benchmark_optimizer_gpu(optimizer_name, steps=100, hidden_dim=4096, layers=4
     
     losses = []
     
+    # Measure Resting VRAM (before forward pass, after previous step cleared)
+    # We do this at the start of the loop (after one step) to ensure steady state
+    resting_gpu_mem = 0
+    
     for i in range(steps):
+        if i == 5: # Measure after a few steps
+            gc.collect()
+            torch.cuda.empty_cache()
+            resting_gpu_mem = get_gpu_memory_usage()
+
         opt.zero_grad()
         loss = (model(x) - y).pow(2).mean()
         loss.backward()
@@ -130,6 +157,7 @@ def benchmark_optimizer_gpu(optimizer_name, steps=100, hidden_dim=4096, layers=4
             opt_state_size += p.numel() * 4 * num_states / 1024 / 1024
             
     print(f"  Avg Step Time: {avg_time:.2f} ms")
+    print(f"  Resting GPU VRAM: {resting_gpu_mem:.2f} MB")
     print(f"  Peak GPU VRAM: {peak_gpu_mem:.2f} MB")
     print(f"  CPU RAM Increase: {end_cpu_mem - start_cpu_mem:.2f} MB")
     print(f"  Est. Opt State Size (Compressed): {opt_state_size:.2f} MB")
@@ -146,7 +174,19 @@ if __name__ == "__main__":
         # AdamW
         benchmark_optimizer_gpu("AdamW (Baseline)")
         benchmark_optimizer_gpu("AdamW (Wrapped Compressed)")
+        benchmark_optimizer_gpu("AdamW (Wrapped Chunked)")
         
         # SGD
         benchmark_optimizer_gpu("SGD (Baseline)")
         benchmark_optimizer_gpu("SGD (Wrapped Compressed)")
+        benchmark_optimizer_gpu("SGD (Wrapped Chunked)")
+
+        # RMSprop
+        benchmark_optimizer_gpu("RMSprop (Baseline)")
+        benchmark_optimizer_gpu("RMSprop (Wrapped Compressed)")
+        benchmark_optimizer_gpu("RMSprop (Wrapped Chunked)")
+
+        # Adagrad
+        benchmark_optimizer_gpu("Adagrad (Baseline)")
+        benchmark_optimizer_gpu("Adagrad (Wrapped Compressed)")
+        benchmark_optimizer_gpu("Adagrad (Wrapped Chunked)")
