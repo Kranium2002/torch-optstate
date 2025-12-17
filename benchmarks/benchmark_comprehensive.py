@@ -58,7 +58,14 @@ def calculate_theoretical_state_mem(model, opt_name, policy_name):
         # 4 bytes per element
         return (param_count * states_per_param * 4) / 1024**2
     elif policy_name == 'int8':
-        # 1 byte per element (ignoring scale overhead which is negligible)
+        if opt_name == 'adamw':
+             # WarmupPolicy default: exp_avg (1 byte) + exp_avg_sq (4 bytes)
+             return (param_count * (1 + 4)) / 1024**2
+        else:
+             # SGD: momentum (1 byte)
+             return (param_count * 1) / 1024**2
+    elif policy_name == 'int8_all':
+        # 1 byte per element
         return (param_count * states_per_param * 1) / 1024**2
     return 0
 
@@ -69,10 +76,10 @@ def run_benchmark():
     if torch.cuda.is_available():
         devices.append('cuda')
         
-    sizes = ['small', 'medium'] # Large might be too slow for quick bench
+    sizes = ['small', 'medium'] 
     optimizers = ['adamw']
-    policies = ['baseline', 'fp32', 'int8']
-    chunk_sizes = [None, 1] # None = full batch, 1 = layer-wise chunking
+    policies = ['baseline', 'fp32', 'int8', 'int8_all']
+    chunk_sizes = [None, 1024, 256, 64, 1] 
     
     print(f"Running benchmarks on: {devices}")
     
@@ -90,10 +97,6 @@ def run_benchmark():
                         # Setup
                         reset_memory(device)
                         model = get_model(size, device)
-                        # Ensure model has enough params to make chunking interesting
-                        # MLP has few params (layers * 2). 
-                        # If chunk_size is 1, we process 1 param at a time.
-                        
                         opt = get_optimizer(opt_name, model.parameters())
                         
                         # Configure Policy
@@ -106,6 +109,8 @@ def run_benchmark():
                                 policy = WarmupPolicy(warmup_steps=1000000) 
                             elif policy_name == 'int8':
                                 policy = WarmupPolicy(warmup_steps=0) # Immediate Int8
+                            elif policy_name == 'int8_all':
+                                policy = WarmupPolicy(warmup_steps=0, variance_codec=Int8MomentumCodec())
                             
                             # Wrap
                             wrapper = wrap(opt, policy=policy, chunk_size=chunk_size)
@@ -113,7 +118,7 @@ def run_benchmark():
                         # Data
                         input_dim = 1024 if size == 'small' else (2048 if size == 'medium' else 4096)
                         x = torch.randn(32, input_dim, device=device)
-                        y = torch.randn(32, 10, device=device) # Output dim 10
+                        y = torch.randn(32, 10, device=device) 
                         
                         # Warmup
                         print(f"  Warmup (may compile)...")
@@ -128,7 +133,7 @@ def run_benchmark():
                             continue
                             
                         # Measure
-                        print(f"  Measuring...")
+                        print(f"  Measuring {device_name} {size} {opt_name} {policy_name} chunk={chunk_size}...")
                         reset_memory(device)
                         
                         # CPU RSS tracking
@@ -140,13 +145,29 @@ def run_benchmark():
                         
                         t0 = time.perf_counter()
                         steps = 10
+                        
+                        peak_step_cuda_list = []
+                        peak_iter_cuda_list = []
+                        
                         try:
                             for _ in range(steps):
                                 wrapper.zero_grad()
                                 loss = model(x).sum()
                                 loss.backward()
+                                
+                                peak_fwd_bwd = 0
+                                if device.type == 'cuda':
+                                    peak_fwd_bwd = torch.cuda.max_memory_allocated(device)
+                                    torch.cuda.reset_peak_memory_stats(device)
+                                
                                 wrapper.step()
                                 
+                                if device.type == 'cuda':
+                                    peak_step = torch.cuda.max_memory_allocated(device)
+                                    peak_step_cuda_list.append(peak_step)
+                                    peak_iter_cuda_list.append(max(peak_fwd_bwd, peak_step))
+                                    torch.cuda.reset_peak_memory_stats(device)
+
                                 # Sample RSS
                                 current_rss = process.memory_info().rss
                                 if current_rss > peak_rss:
@@ -164,10 +185,16 @@ def run_benchmark():
                         rss_peak_mb = peak_rss / 1024**2
                         rss_end_mb = process.memory_info().rss / 1024**2
                         
-                        cuda_peak_allocated_mb = 0
+                        cuda_peak_step_mb = 0
+                        cuda_peak_iter_mb = 0
+                        cuda_end_alloc_mb = 0
                         cuda_peak_reserved_mb = 0
+                        
                         if device.type == 'cuda':
-                            cuda_peak_allocated_mb = torch.cuda.max_memory_allocated(device) / 1024**2
+                            if peak_step_cuda_list:
+                                cuda_peak_step_mb = max(peak_step_cuda_list) / 1024**2
+                                cuda_peak_iter_mb = max(peak_iter_cuda_list) / 1024**2
+                            cuda_end_alloc_mb = torch.cuda.memory_allocated(device) / 1024**2
                             cuda_peak_reserved_mb = torch.cuda.max_memory_reserved(device) / 1024**2
                             
                         store_mb = 0
@@ -193,7 +220,9 @@ def run_benchmark():
                             'theo_mb': theo_mem,
                             'rss_peak_mb': rss_peak_mb,
                             'rss_end_mb': rss_end_mb,
-                            'cuda_alloc_mb': cuda_peak_allocated_mb,
+                            'cuda_step_mb': cuda_peak_step_mb,
+                            'cuda_iter_mb': cuda_peak_iter_mb,
+                            'cuda_end_mb': cuda_end_alloc_mb,
                             'cuda_res_mb': cuda_peak_reserved_mb,
                             'store_mb': store_mb,
                             'time_ms': avg_time * 1000,
@@ -211,10 +240,8 @@ def run_benchmark():
 
     df = pd.DataFrame(results)
     print("\nBenchmark Results:")
-    # Use to_string to avoid tabulate dependency
     print(df.to_string(index=False, float_format="%.2f"))
     
-    # Save
     df.to_csv('benchmark_results.csv', index=False)
 
 if __name__ == "__main__":
