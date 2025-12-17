@@ -50,7 +50,7 @@ def run_benchmark():
     sizes = ['small', 'medium'] # Large might be too slow for quick bench
     optimizers = ['adamw']
     policies = ['fp32', 'int8']
-    chunk_sizes = [None, 1024] # None = full batch, 1024 = chunked
+    chunk_sizes = [None, 1] # None = full batch, 1 = layer-wise chunking
     
     print(f"Running benchmarks on: {devices}")
     
@@ -65,6 +65,10 @@ def run_benchmark():
                         # Setup
                         reset_memory(device)
                         model = get_model(size, device)
+                        # Ensure model has enough params to make chunking interesting
+                        # MLP has few params (layers * 2). 
+                        # If chunk_size is 1, we process 1 param at a time.
+                        
                         opt = get_optimizer(opt_name, model.parameters())
                         
                         # Configure Policy
@@ -87,23 +91,33 @@ def run_benchmark():
                         y = torch.randn(32, 10, device=device) # Output dim 10
                         
                         # Warmup
-                        for _ in range(3):
-                            wrapper.zero_grad()
-                            loss = model(x).sum()
-                            loss.backward()
-                            wrapper.step()
+                        print(f"  Warmup (may compile)...")
+                        try:
+                            for _ in range(3):
+                                wrapper.zero_grad()
+                                loss = model(x).sum()
+                                loss.backward()
+                                wrapper.step()
+                        except Exception as e:
+                            print(f"  Failed during warmup: {e}")
+                            continue
                             
                         # Measure
+                        print(f"  Measuring...")
                         reset_memory(device)
                         start_mem = measure_peak_memory(device)
                         
                         t0 = time.perf_counter()
                         steps = 10
-                        for _ in range(steps):
-                            wrapper.zero_grad()
-                            loss = model(x).sum()
-                            loss.backward()
-                            wrapper.step()
+                        try:
+                            for _ in range(steps):
+                                wrapper.zero_grad()
+                                loss = model(x).sum()
+                                loss.backward()
+                                wrapper.step()
+                        except Exception as e:
+                            print(f"  Failed during measurement: {e}")
+                            continue
                         t1 = time.perf_counter()
                         
                         peak_mem = measure_peak_memory(device)
@@ -136,7 +150,8 @@ def run_benchmark():
 
     df = pd.DataFrame(results)
     print("\nBenchmark Results:")
-    print(df.to_markdown(index=False, floatfmt=".2f"))
+    # Use to_string to avoid tabulate dependency
+    print(df.to_string(index=False, float_format="%.2f"))
     
     # Save
     df.to_csv('benchmark_results.csv', index=False)
