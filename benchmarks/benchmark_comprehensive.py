@@ -147,7 +147,8 @@ def run_benchmark():
                         steps = 10
                         
                         peak_step_cuda_list = []
-                        peak_iter_cuda_list = []
+                        step_delta_peak_list = []
+                        end_alloc_list = []
                         
                         try:
                             for _ in range(steps):
@@ -155,17 +156,22 @@ def run_benchmark():
                                 loss = model(x).sum()
                                 loss.backward()
                                 
-                                peak_fwd_bwd = 0
                                 if device.type == 'cuda':
-                                    peak_fwd_bwd = torch.cuda.max_memory_allocated(device)
+                                    torch.cuda.synchronize()
+                                    pre_alloc = torch.cuda.memory_allocated(device)
                                     torch.cuda.reset_peak_memory_stats(device)
                                 
                                 wrapper.step()
                                 
                                 if device.type == 'cuda':
-                                    peak_step = torch.cuda.max_memory_allocated(device)
-                                    peak_step_cuda_list.append(peak_step)
-                                    peak_iter_cuda_list.append(max(peak_fwd_bwd, peak_step))
+                                    torch.cuda.synchronize()
+                                    peak_alloc = torch.cuda.max_memory_allocated(device)
+                                    post_alloc = torch.cuda.memory_allocated(device)
+                                    
+                                    peak_step_cuda_list.append(peak_alloc)
+                                    step_delta_peak_list.append(peak_alloc - pre_alloc)
+                                    end_alloc_list.append(post_alloc)
+                                    
                                     torch.cuda.reset_peak_memory_stats(device)
 
                                 # Sample RSS
@@ -186,16 +192,16 @@ def run_benchmark():
                         rss_end_mb = process.memory_info().rss / 1024**2
                         
                         cuda_peak_step_mb = 0
-                        cuda_peak_iter_mb = 0
+                        cuda_step_delta_mb = 0
                         cuda_end_alloc_mb = 0
-                        cuda_peak_reserved_mb = 0
                         
                         if device.type == 'cuda':
                             if peak_step_cuda_list:
                                 cuda_peak_step_mb = max(peak_step_cuda_list) / 1024**2
-                                cuda_peak_iter_mb = max(peak_iter_cuda_list) / 1024**2
-                            cuda_end_alloc_mb = torch.cuda.memory_allocated(device) / 1024**2
-                            cuda_peak_reserved_mb = torch.cuda.max_memory_reserved(device) / 1024**2
+                            if step_delta_peak_list:
+                                cuda_step_delta_mb = max(step_delta_peak_list) / 1024**2
+                            if end_alloc_list:
+                                cuda_end_alloc_mb = end_alloc_list[-1] / 1024**2
                             
                         store_mb = 0
                         if hasattr(wrapper, 'store'):
@@ -221,9 +227,8 @@ def run_benchmark():
                             'rss_peak_mb': rss_peak_mb,
                             'rss_end_mb': rss_end_mb,
                             'cuda_step_mb': cuda_peak_step_mb,
-                            'cuda_iter_mb': cuda_peak_iter_mb,
+                            'cuda_delta_mb': cuda_step_delta_mb,
                             'cuda_end_mb': cuda_end_alloc_mb,
-                            'cuda_res_mb': cuda_peak_reserved_mb,
                             'store_mb': store_mb,
                             'time_ms': avg_time * 1000,
                             'mat_ms': timings.get('materialize', 0) * 1000,
