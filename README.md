@@ -11,7 +11,7 @@ Training large models is often memory-bound. While parameters and gradients take
 `torch-optstate` solves this by:
 1.  **Reducing Memory Footprint**: Compresses optimizer state by **25% to 75%** with minimal accuracy loss.
 2.  **Drop-in Compatibility**: Works with your existing `torch.optim` optimizers and training loops.
-3.  **CPU Offloading Ready**: Designed to manage state on CPU, freeing up precious GPU memory (future GPU support planned).
+3.  **Optimizer Offloading**: Stores compressed state in CPU RAM and materializes it on GPU VRAM only when needed. This effectively gives you "infinite VRAM" for optimizer states.
 4.  **Policy-Driven**: You control the trade-off between precision, speed, and memory.
 
 ### Benchmark Highlights (CPU)
@@ -108,6 +108,25 @@ policy = ConfigurablePolicy(
 optimizer = wrap(optimizer, policy=policy)
 ```
 
+### 4. GPU Offloading (Infinite VRAM)
+
+`torch-optstate` automatically handles device placement. If your model is on GPU, the optimizer state will be stored in compressed form on CPU RAM, and materialized to GPU VRAM only during the `step()`.
+
+```python
+# Standard PyTorch GPU setup
+model = MyModel().cuda()
+optimizer = wrap(AdamW(model.parameters()))
+
+# The wrapper automatically:
+# 1. Loads compressed state from CPU RAM
+# 2. Moves to GPU VRAM
+# 3. Decompresses to FP32 on GPU
+# 4. Runs optimizer step on GPU
+# 5. Compresses on GPU
+# 6. Moves back to CPU RAM
+optimizer.step()
+```
+
 ## 🧠 How It Works
 
 1.  **Virtualization**: The `OptimizerWrapper` intercepts `step()` calls.
@@ -117,7 +136,6 @@ optimizer = wrap(optimizer, policy=policy)
 
 ## ⚠️ Limitations
 
-- **CPU Only**: Currently, state management is optimized for CPU. GPU support is planned.
 - **Step Overhead**: Decompression/Compression adds overhead to the `step()` call. This is often negligible compared to the forward/backward pass of large models.
 - **Optimizer Support**: Tested primarily with AdamW and SGD. Other optimizers should work but may require custom policies if they use non-standard state keys.
 

@@ -31,7 +31,7 @@ class StateStore:
         state_dict = {}
         for key, (codec, packed) in self._store[param].items():
             if isinstance(codec, Codec):
-                state_dict[key] = codec.decode(packed)
+                state_dict[key] = codec.decode(packed, device=param.device)
             else:
                 # Fallback for non-tensor state (e.g. step number)
                 state_dict[key] = packed
@@ -43,26 +43,28 @@ class StateStore:
         """
         results = [{} for _ in params]
         
-        # Group tasks: codec -> (list of packed_data, list of (param_idx, key))
+        # Group tasks: (codec, device) -> (list of packed_data, list of (param_idx, key))
         tasks = {} 
         
         for i, param in enumerate(params):
             if param not in self._store:
                 continue
-                
+            
+            device = param.device
             for key, (codec, packed) in self._store[param].items():
                 if isinstance(codec, Codec):
-                    if codec not in tasks:
-                        tasks[codec] = ([], [])
-                    tasks[codec][0].append(packed)
-                    tasks[codec][1].append((i, key))
+                    task_key = (codec, device)
+                    if task_key not in tasks:
+                        tasks[task_key] = ([], [])
+                    tasks[task_key][0].append(packed)
+                    tasks[task_key][1].append((i, key))
                 else:
                     # Non-tensor state
                     results[i][key] = packed
                     
         # Execute batch decodes
-        for codec, (packed_list, indices) in tasks.items():
-            decoded_list = codec.batch_decode(packed_list)
+        for (codec, device), (packed_list, indices) in tasks.items():
+            decoded_list = codec.batch_decode(packed_list, device=device)
             for val, (idx, key) in zip(decoded_list, indices):
                 results[idx][key] = val
                 

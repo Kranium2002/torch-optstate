@@ -7,14 +7,29 @@ import psutil
 import os
 import gc
 
-def get_memory_usage():
+def get_cpu_memory_usage():
     process = psutil.Process(os.getpid())
     return process.memory_info().rss / 1024 / 1024  # MB
 
-def benchmark_optimizer(optimizer_name, steps=100, hidden_dim=1024, layers=4):
-    print(f"Benchmarking {optimizer_name}...")
+def get_gpu_memory_usage():
+    return torch.cuda.memory_allocated() / 1024 / 1024 # MB
+
+def reset_peak_memory():
+    torch.cuda.reset_peak_memory_stats()
+
+def get_peak_gpu_memory():
+    return torch.cuda.max_memory_allocated() / 1024 / 1024 # MB
+
+def benchmark_optimizer_gpu(optimizer_name, steps=100, hidden_dim=4096, layers=4):
+    if not torch.cuda.is_available():
+        print("CUDA not available, skipping GPU benchmark.")
+        return
+
+    print(f"Benchmarking {optimizer_name} on GPU...")
     
-    # Create a reasonably sized model
+    device = torch.device('cuda')
+    
+    # Create a larger model for GPU to see VRAM impact
     model = nn.Sequential(
         nn.Linear(hidden_dim, hidden_dim),
         nn.ReLU(),
@@ -23,11 +38,11 @@ def benchmark_optimizer(optimizer_name, steps=100, hidden_dim=1024, layers=4):
         nn.Linear(hidden_dim, hidden_dim),
         nn.ReLU(),
         nn.Linear(hidden_dim, 10)
-    )
+    ).to(device)
     
     # Data
-    x = torch.randn(32, hidden_dim)
-    y = torch.randn(32, 10)
+    x = torch.randn(32, hidden_dim, device=device)
+    y = torch.randn(32, 10, device=device)
     
     # Optimizer
     if "AdamW" in optimizer_name:
@@ -78,9 +93,13 @@ def benchmark_optimizer(optimizer_name, steps=100, hidden_dim=1024, layers=4):
         opt.step()
         
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    start_mem = get_memory_usage()
+    torch.cuda.empty_cache()
+    reset_peak_memory()
+    
+    start_cpu_mem = get_cpu_memory_usage()
+    start_gpu_mem = get_gpu_memory_usage()
+    
+    torch.cuda.synchronize()
     start_time = time.time()
     
     losses = []
@@ -92,8 +111,11 @@ def benchmark_optimizer(optimizer_name, steps=100, hidden_dim=1024, layers=4):
         opt.step()
         losses.append(loss.item())
         
+    torch.cuda.synchronize()
     end_time = time.time()
-    end_mem = get_memory_usage()
+    
+    end_cpu_mem = get_cpu_memory_usage()
+    peak_gpu_mem = get_peak_gpu_memory()
     
     avg_time = (end_time - start_time) / steps * 1000 # ms
     
@@ -108,26 +130,23 @@ def benchmark_optimizer(optimizer_name, steps=100, hidden_dim=1024, layers=4):
             opt_state_size += p.numel() * 4 * num_states / 1024 / 1024
             
     print(f"  Avg Step Time: {avg_time:.2f} ms")
-    print(f"  Peak RSS Increase: {end_mem - start_mem:.2f} MB")
-    print(f"  Est. Opt State Size: {opt_state_size:.2f} MB")
+    print(f"  Peak GPU VRAM: {peak_gpu_mem:.2f} MB")
+    print(f"  CPU RAM Increase: {end_cpu_mem - start_cpu_mem:.2f} MB")
+    print(f"  Est. Opt State Size (Compressed): {opt_state_size:.2f} MB")
     print(f"  Final Loss: {losses[-1]:.4f}")
     print("-" * 40)
 
 if __name__ == "__main__":
-    print(f"Initial Memory: {get_memory_usage():.2f} MB")
-    
-    # AdamW
-    benchmark_optimizer("AdamW (Baseline)")
-    benchmark_optimizer("AdamW (Wrapped FP32)")
-    benchmark_optimizer("AdamW (Wrapped Compressed)")
-    
-    # SGD
-    benchmark_optimizer("SGD (Baseline)")
-    benchmark_optimizer("SGD (Wrapped FP32)")
-    benchmark_optimizer("SGD (Wrapped Compressed)")
-
-    # RMSprop
-    benchmark_optimizer("RMSprop (Baseline)")
-    benchmark_optimizer("RMSprop (Wrapped FP32)")
-    benchmark_optimizer("RMSprop (Wrapped Compressed)")
-
+    if not torch.cuda.is_available():
+        print("CUDA is not available. Cannot run GPU benchmark.")
+    else:
+        print(f"Initial CPU Memory: {get_cpu_memory_usage():.2f} MB")
+        print(f"Initial GPU Memory: {get_gpu_memory_usage():.2f} MB")
+        
+        # AdamW
+        benchmark_optimizer_gpu("AdamW (Baseline)")
+        benchmark_optimizer_gpu("AdamW (Wrapped Compressed)")
+        
+        # SGD
+        benchmark_optimizer_gpu("SGD (Baseline)")
+        benchmark_optimizer_gpu("SGD (Wrapped Compressed)")

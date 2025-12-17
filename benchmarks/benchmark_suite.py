@@ -178,9 +178,18 @@ def run_benchmark(
         policy = policy_factory()
         
         if policy is not None:
-            # Handle policy configuration for SGD if needed
-            if isinstance(policy, WarmupPolicy) and 'SGD' in config.optimizer_name:
-                policy.momentum_key = 'momentum_buffer'
+            # Handle policy configuration for specific optimizers
+            if isinstance(policy, WarmupPolicy):
+                if 'SGD' in config.optimizer_name:
+                    policy.momentum_key = 'momentum_buffer'
+                    policy.variance_key = 'unused_key'
+                elif 'RMSprop' in config.optimizer_name:
+                    policy.momentum_key = 'momentum_buffer'
+                    policy.variance_key = 'square_avg'
+                elif 'Adagrad' in config.optimizer_name:
+                    policy.momentum_key = 'unused_key'
+                    policy.variance_key = 'sum'
+
             opt = wrap(base_opt, policy=policy)
         else:
             opt = base_opt
@@ -324,7 +333,9 @@ def main():
     
     optimizers = [
         ("AdamW", optim.AdamW, {"lr": 1e-3}),
-        ("SGD+Mom", optim.SGD, {"lr": 1e-2, "momentum": 0.9})
+        ("SGD+Mom", optim.SGD, {"lr": 1e-2, "momentum": 0.9}),
+        ("RMSprop", optim.RMSprop, {"lr": 1e-3, "momentum": 0.9}),
+        ("Adagrad", optim.Adagrad, {"lr": 1e-2})
     ]
     
     policies = [
@@ -334,9 +345,9 @@ def main():
         ("Wrapped(MixedFP16)", lambda: ConfigurablePolicy(
             codecs_map={
                 'exp_avg': FP16Codec(),       # AdamW momentum
-                'momentum_buffer': FP16Codec() # SGD momentum
+                'momentum_buffer': FP16Codec() # SGD/RMSprop momentum
             }, 
-            default_codec=FP32Codec() # Keep variance (exp_avg_sq) in FP32
+            default_codec=FP32Codec() # Keep variance (exp_avg_sq, square_avg, sum) in FP32
         ))
     ]
 
