@@ -146,35 +146,54 @@ def run_benchmark():
                         t0 = time.perf_counter()
                         steps = 10
                         
-                        peak_step_cuda_list = []
-                        step_delta_peak_list = []
+                        iter_peak_alloc_list = []
+                        iter_peak_res_list = []
+                        step_extra_alloc_list = []
                         end_alloc_list = []
+                        end_res_list = []
                         
                         try:
                             for _ in range(steps):
-                                wrapper.zero_grad()
+                                if device.type == 'cuda':
+                                    torch.cuda.synchronize()
+                                    torch.cuda.reset_peak_memory_stats(device)
+                                
+                                wrapper.zero_grad(set_to_none=True)
                                 loss = model(x).sum()
                                 loss.backward()
                                 
+                                fwd_bwd_peak_alloc = 0
+                                fwd_bwd_peak_res = 0
+                                pre_step_alloc = 0
+                                
                                 if device.type == 'cuda':
                                     torch.cuda.synchronize()
-                                    pre_alloc = torch.cuda.memory_allocated(device)
+                                    fwd_bwd_peak_alloc = torch.cuda.max_memory_allocated(device)
+                                    fwd_bwd_peak_res = torch.cuda.max_memory_reserved(device)
+                                    pre_step_alloc = torch.cuda.memory_allocated(device)
                                     torch.cuda.reset_peak_memory_stats(device)
                                 
                                 wrapper.step()
                                 
                                 if device.type == 'cuda':
                                     torch.cuda.synchronize()
-                                    peak_alloc = torch.cuda.max_memory_allocated(device)
-                                    post_alloc = torch.cuda.memory_allocated(device)
+                                    step_peak_alloc = torch.cuda.max_memory_allocated(device)
+                                    step_peak_res = torch.cuda.max_memory_reserved(device)
+                                    end_alloc = torch.cuda.memory_allocated(device)
+                                    end_res = torch.cuda.memory_reserved(device)
                                     
-                                    peak_step_cuda_list.append(peak_alloc)
-                                    step_delta_peak_list.append(peak_alloc - pre_alloc)
-                                    end_alloc_list.append(post_alloc)
+                                    # Metrics
+                                    iter_peak_alloc = max(fwd_bwd_peak_alloc, step_peak_alloc)
+                                    iter_peak_res = max(fwd_bwd_peak_res, step_peak_res)
+                                    step_extra = step_peak_alloc - pre_step_alloc
                                     
-                                    torch.cuda.reset_peak_memory_stats(device)
+                                    iter_peak_alloc_list.append(iter_peak_alloc)
+                                    iter_peak_res_list.append(iter_peak_res)
+                                    step_extra_alloc_list.append(step_extra)
+                                    end_alloc_list.append(end_alloc)
+                                    end_res_list.append(end_res)
 
-                                # Sample RSS
+                                # Sample RSS (CPU)
                                 current_rss = process.memory_info().rss
                                 if current_rss > peak_rss:
                                     peak_rss = current_rss
@@ -191,17 +210,19 @@ def run_benchmark():
                         rss_peak_mb = peak_rss / 1024**2
                         rss_end_mb = process.memory_info().rss / 1024**2
                         
-                        cuda_peak_step_mb = 0
-                        cuda_step_delta_mb = 0
+                        cuda_iter_peak_mb = 0
+                        cuda_iter_res_mb = 0
+                        cuda_step_extra_mb = 0
                         cuda_end_alloc_mb = 0
+                        cuda_end_res_mb = 0
                         
                         if device.type == 'cuda':
-                            if peak_step_cuda_list:
-                                cuda_peak_step_mb = max(peak_step_cuda_list) / 1024**2
-                            if step_delta_peak_list:
-                                cuda_step_delta_mb = max(step_delta_peak_list) / 1024**2
-                            if end_alloc_list:
+                            if iter_peak_alloc_list:
+                                cuda_iter_peak_mb = max(iter_peak_alloc_list) / 1024**2
+                                cuda_iter_res_mb = max(iter_peak_res_list) / 1024**2
+                                cuda_step_extra_mb = max(step_extra_alloc_list) / 1024**2
                                 cuda_end_alloc_mb = end_alloc_list[-1] / 1024**2
+                                cuda_end_res_mb = end_res_list[-1] / 1024**2
                             
                         store_mb = 0
                         if hasattr(wrapper, 'store'):
@@ -226,9 +247,11 @@ def run_benchmark():
                             'theo_mb': theo_mem,
                             'rss_peak_mb': rss_peak_mb,
                             'rss_end_mb': rss_end_mb,
-                            'cuda_step_mb': cuda_peak_step_mb,
-                            'cuda_delta_mb': cuda_step_delta_mb,
-                            'cuda_end_mb': cuda_end_alloc_mb,
+                            'cuda_iter_peak_mb': cuda_iter_peak_mb,
+                            'cuda_iter_res_mb': cuda_iter_res_mb,
+                            'cuda_step_extra_mb': cuda_step_extra_mb,
+                            'cuda_end_alloc_mb': cuda_end_alloc_mb,
+                            'cuda_end_res_mb': cuda_end_res_mb,
                             'store_mb': store_mb,
                             'time_ms': avg_time * 1000,
                             'mat_ms': timings.get('materialize', 0) * 1000,
