@@ -14,6 +14,19 @@ Training large models is often memory-bound. While parameters and gradients take
 3.  **Optimizer Offloading**: Stores compressed state in CPU RAM and materializes it on GPU VRAM only when needed. This effectively gives you "infinite VRAM" for optimizer states.
 4.  **Policy-Driven**: You control the trade-off between precision, speed, and memory.
 
+### Benchmark Highlights (GPU - "Infinite VRAM")
+
+By offloading optimizer state to CPU and processing updates in chunks, `torch-optstate` drastically reduces VRAM usage.
+
+| Optimizer | Metric | Baseline | Wrapped (Chunked) | Reduction |
+| :--- | :--- | :--- | :--- | :--- |
+| **AdamW** | **Peak VRAM** | 979 MB | **658 MB** | **33%** |
+| | **Resting VRAM** | 787 MB | **402 MB** | **49%** |
+| **Adagrad** | **Peak VRAM** | 979 MB | **594 MB** | **39%** |
+| | **Resting VRAM** | 594 MB | **402 MB** | **32%** |
+
+*Resting VRAM is the memory usage between steps (i.e., during Forward/Backward passes). Lower is better as it allows for larger batch sizes.*
+
 ### Benchmark Highlights (CPU)
 
 | Model | Optimizer | Policy | State Size | Reduction | Status |
@@ -63,7 +76,16 @@ for input, target in dataset:
     optimizer.step()
 ```
 
-### 2. Custom Policies
+### 2. Low Peak Memory (Chunked Updates)
+
+To minimize Peak VRAM usage, use the `chunk_size` argument. This processes parameter updates in small batches, ensuring only a fraction of the optimizer state is on the GPU at any time.
+
+```python
+# Process 1000 parameters at a time
+optimizer = wrap(optimizer, chunk_size=1000)
+```
+
+### 3. Custom Policies
 
 You can define custom policies to control compression behavior.
 
