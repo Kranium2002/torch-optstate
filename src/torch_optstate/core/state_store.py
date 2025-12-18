@@ -7,7 +7,7 @@ class StateStore:
     Central storage for virtualized optimizer state.
     Manages compression, storage, and materialization of state tensors.
     """
-    def __init__(self):
+    def __init__(self, pin_memory: bool = False):
         # Storage structure:
         # {
         #   param_id: {
@@ -17,6 +17,7 @@ class StateStore:
         # We use stable IDs (int) as keys to ensure robustness across serialization.
         self._store: Dict[int, Dict[str, Any]] = {}
         self._total_bytes = 0
+        self._pin_memory = pin_memory
 
     def materialize(self, param_id: int, target_device: torch.device) -> Dict[str, Any]:
         """
@@ -113,6 +114,8 @@ class StateStore:
         for codec, (tensor_list, indices) in tasks.items():
             packed_list = codec.batch_encode(tensor_list)
             for packed, (idx, key) in zip(packed_list, indices):
+                # Optionally pin CPU tensors to speed GPU transfers later
+                packed = self._maybe_pin(packed)
                 pid = param_ids[idx]
                 self._store[pid][key] = (codec, packed)
                 self._total_bytes += codec.bytes(packed)
@@ -126,6 +129,27 @@ class StateStore:
                 self._total_bytes -= codec.bytes(packed)
             elif isinstance(packed, (int, float)):
                 self._total_bytes -= 8
+
+    def _maybe_pin(self, packed: Any) -> Any:
+        # Pin CPU tensors or tuples of tensors if requested
+        if not self._pin_memory:
+            return packed
+        try:
+            if isinstance(packed, torch.Tensor) and packed.device.type == 'cpu':
+                return packed.pin_memory()
+            if isinstance(packed, tuple):
+                pinned = []
+                changed = False
+                for item in packed:
+                    if isinstance(item, torch.Tensor) and item.device.type == 'cpu':
+                        pinned.append(item.pin_memory())
+                        changed = True
+                    else:
+                        pinned.append(item)
+                return tuple(pinned) if changed else packed
+        except Exception:
+            return packed
+        return packed
 
     def get_memory_usage(self) -> int:
         """

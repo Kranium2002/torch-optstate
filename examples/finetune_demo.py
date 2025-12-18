@@ -23,6 +23,8 @@ from torch_optstate.policy.simple import WarmupPolicy
 from torch_optstate.policy.auto import AdaptiveWarmupPolicy
 from torch_optstate.codecs import Int8MomentumCodec, FP32Codec, FP16Codec
 from torch_optstate.policy.base import Policy
+from torch_optstate.low_memory import wrap_low_memory_adamw
+from torch_optstate.utils import enable_gradient_checkpointing
 from benchmarks.models import TinyTransformer
 
 class Int8AllPolicy(Policy):
@@ -100,11 +102,12 @@ class SimpleDataset(Dataset):
     def __len__(self):
         return len(self.labels)
 
-def get_data(tokenizer, num_samples=1000, val_split: float = 0.1, max_length: int = 128):
+def get_data(tokenizer, num_samples=1000, val_split: float = 0.1, max_length: int = 128, shuffle_seed: int = 42):
     if HAS_DATASETS:
         print("Loading IMDB dataset...")
         try:
-            dataset = load_dataset("imdb", split=f"train[:{num_samples}]")
+            dataset = load_dataset("imdb", split="train").shuffle(seed=shuffle_seed)
+            dataset = dataset.select(range(num_samples))
             texts = dataset['text']
             labels = dataset['label']
         except Exception as e:
@@ -199,7 +202,7 @@ def train_model(
         model = LargeSyntheticModel().to(device)
         tokenizer = None # Not needed
     elif use_small_llm:
-        print("Using TinyTransformer (small LLM) on IMDB to demonstrate compression on sequence models...")
+        print("Using Tiny Transformer (small LLM) on IMDB to demonstrate compression on sequence models...")
         tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
         model = TinyTransformer(
             vocab_size=tokenizer.vocab_size,
@@ -410,7 +413,8 @@ def write_metrics_csv(path: str, rows: List[Dict[str, Any]]):
 def main():
     parser = argparse.ArgumentParser(description='Fine-tune demo with memory tracking')
     parser.add_argument('--steps', type=int, default=1, help='Number of steps to run')
-    parser.add_argument('--chunk_size', type=int, default=100, help='Chunk size for Torch-OptState (number of tensors, e.g. 100)')
+    parser.add_argument('--chunk_size', type=int, default=None, help='Chunk size for Torch-OptState (number of tensors). If not set, uses an auto-chosen small chunk.')
+    parser.add_argument('--initial_chunk_size', type=int, default=None, help='Optional smaller chunk size for the first step to lower initial peak memory (defaults internally to a tiny chunk).')
     parser.add_argument('--large_model', action='store_true', help='Use a large synthetic model to demonstrate scaling')
     parser.add_argument('--small_llm', action='store_true', help='Use a tiny Transformer (LLM-style) synthetic model')
     parser.add_argument('--small_llm_dim', type=int, default=256, help='Hidden size (d_model) for tiny Transformer LLM mode')
@@ -430,6 +434,7 @@ def main():
     parser.add_argument('--auto_warmup', action='store_true', help='Enable adaptive warmup: switch to compression when loss stops improving')
     parser.add_argument('--auto_patience', type=int, default=5, help='Steps without loss improvement before enabling compression when auto_warmup is on')
     parser.add_argument('--auto_tol', type=float, default=1e-3, help='Minimum loss improvement to reset patience when auto_warmup is on')
+    parser.add_argument('--pin_memory', action='store_true', help='Pin compressed CPU state to accelerate GPU transfers (otherwise auto-on when using CUDA).')
     args = parser.parse_args()
     
     # Ensure warmup can actually complete within the run for short demos
@@ -442,6 +447,8 @@ def main():
     print(f"Running for {args.steps} steps with {args.optimizer}")
     if args.chunk_size:
         print(f"Using chunk size: {args.chunk_size}")
+    else:
+        print("Using auto chunk size (small, chunked by default)")
     if args.large_model:
         print("Using Large Synthetic Model")
     if args.small_llm:
@@ -456,7 +463,8 @@ def main():
     def baseline_factory(params):
         if args.optimizer == 'sgd':
             return torch.optim.SGD(params, lr=1e-3, momentum=0.9)
-        return torch.optim.AdamW(params, lr=5e-5)
+        # True baseline: plain AdamW, no wrapping/compression
+        return torch.optim.AdamW(params, lr=5e-5, weight_decay=0.01)
     
     # Clear memory before run
     gc.collect()
@@ -483,23 +491,22 @@ def main():
     # 2. Torch-OptState Run
     print(f"\n--- Running Torch-OptState (Wrapped {args.optimizer.upper()}) ---")
     def optstate_factory(params):
-        # Choose how aggressive to compress the variance state for AdamW (SGD ignores variance)
-        variance_codec = None
+        # Choose variance compression mode
+        variance_mode = 'fp32'
         if args.compression_mode == 'fp16_variance':
-            variance_codec = FP16Codec()
+            variance_mode = 'fp16'
         elif args.compression_mode in ['int8_variance', 'int8_all']:
-            variance_codec = Int8MomentumCodec()
-
-        policy_cls = AdaptiveWarmupPolicy if args.auto_warmup else WarmupPolicy
+            variance_mode = 'int8'
 
         if args.optimizer == 'sgd':
             base_opt = torch.optim.SGD(params, lr=1e-3, momentum=0.9)
+            policy_cls = AdaptiveWarmupPolicy if args.auto_warmup else WarmupPolicy
             if args.auto_warmup:
                 policy = policy_cls(
                     warmup_steps=effective_warmup,
                     momentum_key='momentum_buffer',
                     variance_key='unused',
-                    variance_codec=variance_codec or FP32Codec(),
+                    variance_codec=FP32Codec(),
                     patience=args.auto_patience,
                     tol=args.auto_tol,
                 )
@@ -508,24 +515,27 @@ def main():
                     warmup_steps=effective_warmup,
                     momentum_key='momentum_buffer',
                     variance_key='unused',
-                    variance_codec=variance_codec or FP32Codec(),
+                    variance_codec=FP32Codec(),
                 )
-        else:
-            base_opt = torch.optim.AdamW(params, lr=5e-5)
-            if args.auto_warmup:
-                policy = policy_cls(
-                    warmup_steps=effective_warmup,
-                    variance_codec=variance_codec or FP32Codec(),
-                    patience=args.auto_patience,
-                    tol=args.auto_tol,
-                )
-            else:
-                policy = policy_cls(
-                    warmup_steps=effective_warmup,
-                    variance_codec=variance_codec or FP32Codec(),
-                ) 
-        
-        return torch_optstate.wrap(base_opt, policy=policy, chunk_size=args.chunk_size)
+            return torch_optstate.auto_wrap(
+                base_opt,
+                policy=policy,
+                chunk_size=args.chunk_size,
+                initial_chunk_size=args.initial_chunk_size,
+                pin_memory=args.pin_memory if args.pin_memory else None,
+            )
+
+        # AdamW path: use low-memory helper
+        return wrap_low_memory_adamw(
+            params,
+            lr=5e-5,
+            weight_decay=0.01,
+            warmup_steps=effective_warmup,
+            variance_mode=variance_mode,
+            chunk_size=args.chunk_size,
+            initial_chunk_size=args.initial_chunk_size,
+            pin_memory=args.pin_memory if args.pin_memory else None,
+        )
 
     # Clear memory before run
     gc.collect()

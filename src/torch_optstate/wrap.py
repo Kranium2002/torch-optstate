@@ -6,16 +6,42 @@ from .core.state_store import StateStore
 from .policy.base import Policy
 from .policy.simple import WarmupPolicy
 
+def _auto_pin(param_groups) -> bool:
+    """
+    Enable pinned CPU storage by default when any parameter lives on CUDA.
+    """
+    for g in param_groups:
+        for p in g["params"]:
+            if p.device.type == "cuda":
+                return True
+    return False
+
 class OptimizerWrapper(Optimizer):
     """
     Wrapper around a PyTorch optimizer that virtualizes its state.
     State is compressed and stored in a StateStore when not in use (i.e. outside of step()).
     """
-    def __init__(self, optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Optional[int] = None):
+    def __init__(
+        self,
+        optimizer: Optimizer,
+        policy: Optional[Policy] = None,
+        chunk_size: Optional[int] = None,
+        initial_chunk_size: Optional[int] = None,
+        pin_memory: Optional[bool] = None,
+    ):
         self.optimizer = optimizer
         self.policy = policy or WarmupPolicy()
-        self.store = StateStore()
+        # Default to pinning when training on CUDA to make offload truly "plug and play".
+        pin_flag = _auto_pin(self.optimizer.param_groups) if pin_memory is None else pin_memory
+        self.store = StateStore(pin_memory=pin_flag)
+
+        # Default chunking is small-but-safe; if unspecified we will derive a chunk size
+        # once param mapping is known.
         self.chunk_size = chunk_size
+        # Optionally use a smaller chunk size for the first step to lower the initial peak.
+        # If not provided, default to 1 to minimize the first-step peak.
+        self.initial_chunk_size = 1 if initial_chunk_size is None else initial_chunk_size
+        self._used_initial_chunk = False
         
         # We don't call super().__init__ because we are proxying.
         # But we need to look like an Optimizer.
@@ -74,83 +100,24 @@ class OptimizerWrapper(Optimizer):
         return self.optimizer.state
 
     def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]:
-        if self.chunk_size is not None and closure is None:
-            return self._step_chunked()
-        
-        t0 = time.perf_counter()
-        
-        # 1. Collect all params
-        all_params = []
-        all_pids = []
-        all_devices = []
-        for group in self.param_groups:
-            for p in group['params']:
-                all_params.append(p)
-                all_pids.append(self.param_to_id[p])
-                all_devices.append(p.device)
+        if closure is not None:
+            raise NotImplementedError("Chunked stepping with closure is not supported.")
 
-        t1 = time.perf_counter()
+        # Always use chunked path. If no chunk_size provided, choose a small default based on param count.
+        effective_chunk = None
+        if self.initial_chunk_size is not None and not self._used_initial_chunk:
+            effective_chunk = self.initial_chunk_size
+            self._used_initial_chunk = True
+        elif self.chunk_size is not None:
+            effective_chunk = self.chunk_size
+        else:
+            total_params = len(self.param_to_id)
+            # Use a small default to avoid large overlap on GPU; scale gently with param count.
+            effective_chunk = max(1, min(8, total_params))
 
-        # 2. Materialize all at once
-        # This allows the store to batch decompressions
-        states = self.store.materialize_batch(all_pids, all_devices)
-        
-        # 3. Populate optimizer.state
-        for param, state in zip(all_params, states):
-            if state: # Only if we had state
-                self.optimizer.state[param] = state
+        return self._step_chunked(effective_chunk)
 
-        t2 = time.perf_counter()
-
-        # 4. Perform the step
-        loss = self.optimizer.step(closure)
-        self._global_step += 1
-
-        t3 = time.perf_counter()
-
-        # 5. Collect new states and codecs for batch commit
-        pids_to_commit = []
-        states_to_commit = []
-        codecs_list = []
-
-        for group in self.param_groups:
-            for p in group['params']:
-                if p in self.optimizer.state:
-                    state = self.optimizer.state[p]
-                    
-                    # Determine step
-                    # Prefer internal step if available (e.g. Adam), else use global counter
-                    step = state.get('step', self._global_step)
-                    if torch.is_tensor(step):
-                        step = step.item()
-                    
-                    # Get codecs from policy
-                    codecs = self.policy.get_codecs(p, state, step)
-                    
-                    pids_to_commit.append(self.param_to_id[p])
-                    states_to_commit.append(state)
-                    codecs_list.append(codecs)
-                    
-        # 6. Commit batch
-        # This allows the store to batch compressions
-        if pids_to_commit:
-            self.store.commit_batch(pids_to_commit, states_to_commit, codecs_list)
-                    
-        # 7. Clear optimizer state to free memory
-        self.optimizer.state.clear()
-
-        t4 = time.perf_counter()
-        
-        self.last_step_timings = {
-            'materialize': t2 - t1,
-            'step': t3 - t2,
-            'commit': t4 - t3,
-            'overhead': (t4 - t0) - ((t2 - t1) + (t3 - t2) + (t4 - t3))
-        }
-
-        return loss
-
-    def _step_chunked(self):
+    def _step_chunked(self, chunk_size: int):
         """
         Performs the step in chunks to minimize peak memory usage.
         This is only possible if no closure is provided.
@@ -170,8 +137,8 @@ class OptimizerWrapper(Optimizer):
         for group_idx, group in enumerate(self.optimizer.param_groups):
             original_params = all_original_params[group_idx]
             
-            for i in range(0, len(original_params), self.chunk_size):
-                chunk_params = original_params[i : i + self.chunk_size]
+            for i in range(0, len(original_params), chunk_size):
+                chunk_params = original_params[i : i + chunk_size]
                 
                 t1 = time.perf_counter()
                 
@@ -196,11 +163,7 @@ class OptimizerWrapper(Optimizer):
                 t3 = time.perf_counter()
                 total_step += (t3 - t2)
                 
-                # Commit
-                pids_to_commit = []
-                states_to_commit = []
-                codecs_list = []
-                
+                # Commit: stream each param to avoid holding FP32 + compressed for many tensors
                 for p in chunk_params:
                     if p in self.optimizer.state:
                         state = self.optimizer.state[p]
@@ -208,13 +171,8 @@ class OptimizerWrapper(Optimizer):
                         if torch.is_tensor(step):
                             step = step.item()
                         codecs = self.policy.get_codecs(p, state, step)
-                        pids_to_commit.append(self.param_to_id[p])
-                        states_to_commit.append(state)
-                        codecs_list.append(codecs)
-                
-                if pids_to_commit:
-                    self.store.commit_batch(pids_to_commit, states_to_commit, codecs_list)
-                
+                        self.store.commit(self.param_to_id[p], state, codecs)
+                # Clear optimizer state for this chunk to free FP32 tensors
                 self.optimizer.state.clear()
                 
                 t4 = time.perf_counter()
@@ -296,7 +254,7 @@ class OptimizerWrapper(Optimizer):
     def __getattr__(self, name):
         return getattr(self.optimizer, name)
 
-def wrap(optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Optional[int] = None) -> OptimizerWrapper:
+def wrap(optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Optional[int] = None, initial_chunk_size: Optional[int] = None, pin_memory: bool = False) -> OptimizerWrapper:
     """
     Wraps an existing PyTorch optimizer with state virtualization.
     
@@ -304,8 +262,25 @@ def wrap(optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Opti
         optimizer: The optimizer to wrap.
         policy: The policy to use for state compression.
         chunk_size: If set, performs step() in chunks of this size to reduce peak memory.
+        initial_chunk_size: Optional smaller chunk size used only for the first step to reduce initial peak (defaults to 1).
+        pin_memory: If True, pin CPU-stored compressed tensors to speed GPU transfers. If None, defaults to True when any parameter is on CUDA.
     
     Returns:
         An OptimizerWrapper instance.
     """
-    return OptimizerWrapper(optimizer, policy, chunk_size)
+    return OptimizerWrapper(optimizer, policy, chunk_size, initial_chunk_size, pin_memory)
+
+
+def auto_wrap(optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Optional[int] = None, initial_chunk_size: Optional[int] = None, pin_memory: Optional[bool] = None) -> OptimizerWrapper:
+    """
+    Plug-and-play helper that applies sensible defaults:
+    - Auto-chunking enabled (small first chunk to tame the initial peak).
+    - Pinned CPU storage enabled when parameters are on CUDA.
+    """
+    return OptimizerWrapper(
+        optimizer,
+        policy=policy,
+        chunk_size=chunk_size,
+        initial_chunk_size=initial_chunk_size,
+        pin_memory=pin_memory,
+    )
