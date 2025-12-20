@@ -5,7 +5,6 @@ from typing import Optional, Dict, Any, Callable
 from .core.state_store import StateStore
 from .policy.base import Policy
 from .policy.simple import WarmupPolicy
-from .codecs import FP16Codec
 
 def _auto_pin(param_groups) -> bool:
     """
@@ -329,9 +328,6 @@ def auto_wrap(
     - Auto-chunking enabled (small first chunk to tame the initial peak).
     - Pinned CPU storage enabled when parameters are on CUDA.
     """
-    if policy is None and _auto_pin(optimizer.param_groups):
-        # On CUDA, prefer FP16 variance for better speed/memory balance.
-        policy = WarmupPolicy(variance_codec=FP16Codec())
     return OptimizerWrapper(
         optimizer,
         policy=policy,

@@ -19,8 +19,8 @@ torch-optstate wraps existing PyTorch optimizers (Adam/AdamW/SGD) to virtualize 
 5) Adaptive warmup policy (optional): switch to compression when loss plateaus.  
 6) Decode scratch cache: reuses decode buffers to reduce per-step allocations.  
 7) Chunk-only path: closures are not supported; keeps peak usage low.
-8) Small-tensor bypass: int8 compression skips tiny tensors by default to reduce overhead (configurable via `WarmupPolicy`).
-9) CUDA fast path: device-resident compression auto-enables on CUDA; `auto_wrap` uses FP16 variance for better speed/memory balance.
+8) Small-tensor bypass: int8 compression skips tiny tensors by default (configurable via `WarmupPolicy`).
+9) CUDA path: device-resident compression auto-enables on CUDA; default policy keeps FP32 variance offloaded.
 10) Max-compression preset: `wrap_max_compression_adamw` for int8-all state with GPU-friendly chunking.
 
 ## Installation
@@ -31,7 +31,7 @@ pip install torch-optstate
 
 ## Usage
 
-### 1) Drop-in (auto chunk + auto pin on CUDA)
+### 1) Drop-in (recommended default)
 ```python
 import torch
 from torch.optim import AdamW
@@ -41,6 +41,7 @@ model = torch.nn.Linear(10, 1).to("cuda")  # or cpu
 opt = AdamW(model.parameters(), lr=1e-3)
 
 # One call: auto chunking, tiny first chunk, auto pin if on CUDA
+# Default policy after warmup: int8 momentum + fp32 variance.
 opt = topt.auto_wrap(opt)
 ```
 
@@ -92,9 +93,10 @@ Example CLI (demo) for GPU:
 poetry run python examples/finetune_demo.py \
   --steps 10 \
   --small_llm \
-  --max_compression_fast \
+  --compression_mode default \
   --metrics_csv gpu_metrics.csv
 ```
+Generates `memory_comparison.png` with GPU VRAM and CPU RAM traces.
 
 ## How it works
 1. Virtualization: `OptimizerWrapper` intercepts `step()`.  
@@ -104,8 +106,9 @@ poetry run python examples/finetune_demo.py \
 
 ## Limitations
 - Closures are not supported (step is chunked-only).
-- Step overhead exists from compress/decompress; usually small vs. forward/backward.
 - Tested mainly on AdamW/SGD; other optimizers may need custom policies.
+
+Future work: speed improvements are planned in upcoming releases.
 
 ## License
 MIT

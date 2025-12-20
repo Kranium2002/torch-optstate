@@ -426,7 +426,7 @@ def main():
     parser.add_argument(
         '--compression_mode',
         type=str,
-        default='fp16_variance',
+        default='default',
         choices=['default', 'fp16_variance', 'int8_variance', 'int8_all'],
         help='default: Int8 momentum, FP32 variance; fp16_variance: Int8 momentum + FP16 variance; int8_variance: Int8 momentum + Int8 variance; int8_all: same as int8_variance'
     )
@@ -613,16 +613,39 @@ def main():
     print(f"\nSaved per-step metrics to {args.metrics_csv}")
 
     # Plotting
-    plt.figure(figsize=(10, 6))
-    plt.plot(base_time, base_mem, label='Baseline (AdamW)', alpha=0.7)
-    plt.plot(opt_time, opt_mem, label='Torch-OptState', alpha=0.7)
-    plt.xlabel('Time (s)')
-    plt.ylabel('Memory (MB)')
-    plt.title(f'Memory Usage during Fine-tuning ({device.type.upper()})')
-    plt.legend()
-    plt.grid(True)
-    
     output_file = 'memory_comparison.png'
+    if device.type == 'cuda':
+        fig, (ax_gpu, ax_cpu) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
+        base_gpu = [row['gpu_mem_mb'] for row in base_metrics]
+        opt_gpu = [row['gpu_mem_mb'] for row in opt_metrics]
+        base_cpu = [row['cpu_mem_mb'] for row in base_metrics]
+        opt_cpu = [row['cpu_mem_mb'] for row in opt_metrics]
+
+        ax_gpu.plot(base_time, base_gpu, label='Baseline GPU', alpha=0.7)
+        ax_gpu.plot(opt_time, opt_gpu, label='Torch-OptState GPU', alpha=0.7)
+        ax_gpu.set_ylabel('GPU VRAM (MB)')
+        ax_gpu.set_title(f'Memory Usage during Fine-tuning ({device.type.upper()})')
+        ax_gpu.legend()
+        ax_gpu.grid(True)
+
+        ax_cpu.plot(base_time, base_cpu, label='Baseline CPU', alpha=0.7)
+        ax_cpu.plot(opt_time, opt_cpu, label='Torch-OptState CPU', alpha=0.7)
+        ax_cpu.set_xlabel('Time (s)')
+        ax_cpu.set_ylabel('CPU RAM (MB)')
+        ax_cpu.legend()
+        ax_cpu.grid(True)
+
+        fig.tight_layout()
+    else:
+        plt.figure(figsize=(10, 6))
+        plt.plot(base_time, base_mem, label='Baseline (AdamW)', alpha=0.7)
+        plt.plot(opt_time, opt_mem, label='Torch-OptState', alpha=0.7)
+        plt.xlabel('Time (s)')
+        plt.ylabel('Memory (MB)')
+        plt.title(f'Memory Usage during Fine-tuning ({device.type.upper()})')
+        plt.legend()
+        plt.grid(True)
+
     plt.savefig(output_file)
     print(f"\nPlot saved to {output_file}")
     
