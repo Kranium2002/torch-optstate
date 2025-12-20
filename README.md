@@ -102,11 +102,11 @@ poetry run python examples/finetune_demo.py \
 Generates `memory_comparison.png` with GPU VRAM and CPU RAM traces.
 
 ## Default benchmark (example)
-From `results_default.csv` (46 steps, default compression):
-- Peak GPU allocated (`gpu_mem_mb`): 188.04 MB -> 102.65 MB (-85.39 MB, -45.4%)
-- Peak GPU peak (`gpu_peak_mb`): 319.31 MB -> 233.92 MB (-85.39 MB, -26.7%)
-- Peak CPU RSS (`cpu_mem_mb`): 1221.67 MB -> 1400.13 MB (+178.46 MB, +14.6%)
-- Peak tensor state (`tensor_mem_mb`): 85.00 MB -> 85.00 MB (+0.00 MB, +0.0%)
+From `results.csv` (46 steps, default compression):
+- Peak GPU allocated (`gpu_mem_mb`): 188.04 MB -> 134.00 MB (-54.04 MB, -28.7%)
+- Peak GPU peak (`gpu_peak_mb`): 319.31 MB -> 265.27 MB (-54.04 MB, -16.9%)
+- Peak CPU RSS (`cpu_mem_mb`): 1220.49 MB -> 1364.05 MB (+143.56 MB, +11.8%)
+- Peak tensor state (`tensor_mem_mb`): 85.00 MB -> 53.20 MB (-31.80 MB, -37.4%)
 
 These numbers reflect the expected trade-off: GPU memory drops while CPU memory rises due to offload.
 
