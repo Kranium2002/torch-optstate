@@ -11,11 +11,13 @@ def make_low_memory_policy(
     variance_mode: str = "fp16",
     momentum_key: str = "exp_avg",
     variance_key: str = "exp_avg_sq",
+    min_int8_elements: int = 4096,
+    small_tensor_codec: Optional[Codec] = None,
 ) -> WarmupPolicy:
     """
     Build a WarmupPolicy aimed at low-memory use:
-    - Momentum is always INT8.
-    - Variance codec can be FP16, INT8, or FP32 based on variance_mode.
+    - Momentum defaults to INT8 (small tensors may use small_tensor_codec for speed).
+    - Variance codec can be FP16, INT8, or FP32 based on variance_mode (small tensors may use small_tensor_codec).
     """
     if variance_mode == "fp16":
         variance_codec: Codec = FP16Codec()
@@ -29,6 +31,8 @@ def make_low_memory_policy(
         momentum_key=momentum_key,
         variance_key=variance_key,
         variance_codec=variance_codec,
+        min_int8_elements=min_int8_elements,
+        small_tensor_codec=small_tensor_codec,
     )
 
 
@@ -41,6 +45,8 @@ def wrap_low_memory_adamw(
     chunk_size: Optional[int] = 32,
     initial_chunk_size: Optional[int] = 1,
     pin_memory: Optional[bool] = None,
+    min_int8_elements: int = 4096,
+    small_tensor_codec: Optional[Codec] = None,
     **adamw_kwargs,
 ) -> Optimizer:
     """
@@ -55,6 +61,8 @@ def wrap_low_memory_adamw(
         chunk_size: Optional chunk size for optimizer step to reduce peak memory.
         initial_chunk_size: Optional smaller chunk size used only for the first step (defaults to 1 for lower first-step peak).
         pin_memory: Pin CPU compressed state to accelerate GPU transfers. Defaults to True when any parameter is on CUDA.
+        min_int8_elements: Minimum elements to use INT8 for momentum/variance; smaller tensors use small_tensor_codec.
+        small_tensor_codec: Codec for tensors smaller than min_int8_elements (defaults to FP32).
         **adamw_kwargs: Passed through to torch.optim.AdamW.
     """
     base_opt = AdamW(params, lr=lr, weight_decay=weight_decay, **adamw_kwargs)
@@ -63,5 +71,7 @@ def wrap_low_memory_adamw(
         variance_mode=variance_mode,
         momentum_key="exp_avg",
         variance_key="exp_avg_sq",
+        min_int8_elements=min_int8_elements,
+        small_tensor_codec=small_tensor_codec,
     )
     return wrap(base_opt, policy=policy, chunk_size=chunk_size, initial_chunk_size=initial_chunk_size, pin_memory=pin_memory)

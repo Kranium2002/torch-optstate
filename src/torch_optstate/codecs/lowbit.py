@@ -1,18 +1,39 @@
 import torch
 import os
 from .base import Codec
-from typing import Any, Tuple
+from typing import Any, Tuple, Callable
 
-# Try to get compile
-# On Windows, torch.compile (Inductor) often requires Triton which isn't standard.
-# We'll skip compilation on Windows to avoid "TritonMissing" errors.
-try:
-    if hasattr(torch, 'compile') and os.name != 'nt':
-        compile_fn = torch.compile
-    else:
-        def compile_fn(x): return x
-except:
-    def compile_fn(x): return x
+def _compile_supported() -> bool:
+    if not hasattr(torch, "compile") or os.name == "nt":
+        return False
+    if os.environ.get("TORCH_COMPILE_DISABLE") in ("1", "true", "True"):
+        return False
+    try:
+        from triton.compiler import compiler as triton_compiler
+        if not hasattr(triton_compiler, "triton_key"):
+            return False
+    except Exception:
+        return False
+    return True
+
+def _maybe_compile(fn: Callable) -> Callable:
+    if not _compile_supported():
+        return fn
+    compiled = torch.compile(fn)
+
+    def wrapped(*args, **kwargs):
+        nonlocal compiled
+        if compiled is None:
+            return fn(*args, **kwargs)
+        try:
+            return compiled(*args, **kwargs)
+        except Exception:
+            compiled = None
+            return fn(*args, **kwargs)
+
+    return wrapped
+
+compile_fn = _maybe_compile
 
 @compile_fn
 def _int8_encode(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

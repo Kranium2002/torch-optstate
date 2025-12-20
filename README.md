@@ -19,6 +19,7 @@ torch-optstate wraps existing PyTorch optimizers (Adam/AdamW/SGD) to virtualize 
 5) Adaptive warmup policy (optional): switch to compression when loss plateaus.  
 6) Decode scratch cache: reuses decode buffers to reduce per-step allocations.  
 7) Chunk-only path: closures are not supported; keeps peak usage low.
+8) Small-tensor bypass: int8 compression skips tiny tensors by default to reduce overhead (configurable via `WarmupPolicy`).
 
 ## Installation
 ```bash
@@ -63,6 +64,7 @@ policy = WarmupPolicy(
     momentum_key="exp_avg",
     variance_key="exp_avg_sq",
     variance_codec=Int8MomentumCodec(),  # int8 variance
+    # min_int8_elements=4096,  # default: skip int8 for tiny tensors
 )
 opt = wrap(opt, policy=policy, chunk_size=8, initial_chunk_size=1)
 ```

@@ -17,10 +17,19 @@ class AdaptiveWarmupPolicy(WarmupPolicy):
         momentum_key: str = "exp_avg",
         variance_key: str = "exp_avg_sq",
         variance_codec: Optional[Codec] = None,
+        min_int8_elements: int = 4096,
+        small_tensor_codec: Optional[Codec] = None,
         patience: int = 5,
         tol: float = 1e-3,
     ):
-        super().__init__(warmup_steps, momentum_key, variance_key, variance_codec)
+        super().__init__(
+            warmup_steps,
+            momentum_key,
+            variance_key,
+            variance_codec,
+            min_int8_elements,
+            small_tensor_codec,
+        )
         self.patience = patience
         self.tol = tol
         self.best_loss: Optional[float] = None
@@ -57,12 +66,18 @@ class AdaptiveWarmupPolicy(WarmupPolicy):
 
         if step >= effective_warmup:
             if self.momentum_key in state:
-                codecs[self.momentum_key] = self.int8_codec
+                tensor = state[self.momentum_key]
+                if torch.is_tensor(tensor):
+                    codecs[self.momentum_key] = self._select_codec(tensor, self.int8_codec)
 
             if "momentum_buffer" in state:
-                codecs["momentum_buffer"] = self.int8_codec
+                tensor = state["momentum_buffer"]
+                if torch.is_tensor(tensor):
+                    codecs["momentum_buffer"] = self._select_codec(tensor, self.int8_codec)
 
             if self.variance_key in state:
-                codecs[self.variance_key] = self.variance_codec
+                tensor = state[self.variance_key]
+                if torch.is_tensor(tensor):
+                    codecs[self.variance_key] = self._select_codec(tensor, self.variance_codec)
 
         return codecs

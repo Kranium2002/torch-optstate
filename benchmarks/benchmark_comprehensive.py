@@ -1,8 +1,9 @@
+import argparse
 import torch
 import torch.nn as nn
 from torch.optim import AdamW, SGD
 from torch_optstate import wrap, WarmupPolicy
-from torch_optstate.codecs import IdentityCodec, Int8MomentumCodec, FP16Codec
+from torch_optstate.codecs import IdentityCodec, Int8MomentumCodec, FP16Codec, FP32Codec
 import time
 import pandas as pd
 import gc
@@ -69,7 +70,12 @@ def calculate_theoretical_state_mem(model, opt_name, policy_name):
         return (param_count * states_per_param * 1) / 1024**2
     return 0
 
-def run_benchmark():
+def run_benchmark(
+    min_int8_elements: int = 4096,
+    small_tensor_codec: str = "fp32",
+    steps: int = 10,
+    warmup_iters: int = 3,
+):
     results = []
     
     devices = ['cpu']
@@ -83,6 +89,13 @@ def run_benchmark():
     
     print(f"Running benchmarks on: {devices}")
     
+    if small_tensor_codec == "fp16":
+        small_tensor_codec_instance = FP16Codec()
+    elif small_tensor_codec == "fp32":
+        small_tensor_codec_instance = FP32Codec()
+    else:
+        raise ValueError(f"Unknown small tensor codec: {small_tensor_codec}")
+
     for device_name in devices:
         device = torch.device(device_name)
         
@@ -110,11 +123,27 @@ def run_benchmark():
 
                             if policy_name == 'fp32':
                                 # Ensure it stays in FP32 for the duration of the benchmark
-                                policy = WarmupPolicy(warmup_steps=1000000, momentum_key=momentum_key) 
+                                policy = WarmupPolicy(
+                                    warmup_steps=1000000,
+                                    momentum_key=momentum_key,
+                                    min_int8_elements=min_int8_elements,
+                                    small_tensor_codec=small_tensor_codec_instance,
+                                )
                             elif policy_name == 'int8':
-                                policy = WarmupPolicy(warmup_steps=0, momentum_key=momentum_key) # Immediate Int8
+                                policy = WarmupPolicy(
+                                    warmup_steps=0,
+                                    momentum_key=momentum_key,
+                                    min_int8_elements=min_int8_elements,
+                                    small_tensor_codec=small_tensor_codec_instance,
+                                ) # Immediate Int8
                             elif policy_name == 'int8_all':
-                                policy = WarmupPolicy(warmup_steps=0, momentum_key=momentum_key, variance_codec=Int8MomentumCodec())
+                                policy = WarmupPolicy(
+                                    warmup_steps=0,
+                                    momentum_key=momentum_key,
+                                    variance_codec=Int8MomentumCodec(),
+                                    min_int8_elements=min_int8_elements,
+                                    small_tensor_codec=small_tensor_codec_instance,
+                                )
                             
                             # Wrap
                             wrapper = wrap(opt, policy=policy, chunk_size=chunk_size)
@@ -127,7 +156,7 @@ def run_benchmark():
                         # Warmup
                         print(f"  Warmup (may compile)...")
                         try:
-                            for _ in range(3):
+                            for _ in range(warmup_iters):
                                 wrapper.zero_grad()
                                 loss = model(x).sum()
                                 loss.backward()
@@ -148,7 +177,7 @@ def run_benchmark():
                             torch.cuda.synchronize()
                         
                         t0 = time.perf_counter()
-                        steps = 10
+                        steps_local = steps
                         
                         iter_peak_alloc_list = []
                         iter_peak_res_list = []
@@ -157,7 +186,7 @@ def run_benchmark():
                         end_res_list = []
                         
                         try:
-                            for _ in range(steps):
+                            for _ in range(steps_local):
                                 if device.type == 'cuda':
                                     torch.cuda.synchronize()
                                     torch.cuda.reset_peak_memory_stats(device)
@@ -232,7 +261,7 @@ def run_benchmark():
                         if hasattr(wrapper, 'store'):
                              store_mb = wrapper.store.get_memory_usage() / 1024**2
                         
-                        avg_time = (t1 - t0) / steps
+                        avg_time = (t1 - t0) / steps_local
                         
                         # Get breakdown from last step
                         if hasattr(wrapper, 'last_step_timings'):
@@ -247,6 +276,8 @@ def run_benchmark():
                             'size': size,
                             'opt': opt_name,
                             'policy': policy_name,
+                            'min_int8_elements': min_int8_elements,
+                            'small_tensor_codec': small_tensor_codec,
                             'chunk': str(chunk_size),
                             'theo_mb': theo_mem,
                             'rss_peak_mb': rss_peak_mb,
@@ -280,4 +311,16 @@ def run_benchmark():
     print(f"\nSaved final results to benchmark_results.csv")
 
 if __name__ == "__main__":
-    run_benchmark()
+    parser = argparse.ArgumentParser(description="Comprehensive benchmark for torch-optstate.")
+    parser.add_argument("--min-int8-elements", type=int, default=4096)
+    parser.add_argument("--small-tensor-codec", choices=["fp32", "fp16"], default="fp32")
+    parser.add_argument("--steps", type=int, default=10)
+    parser.add_argument("--warmup-iters", type=int, default=3)
+    args = parser.parse_args()
+
+    run_benchmark(
+        min_int8_elements=args.min_int8_elements,
+        small_tensor_codec=args.small_tensor_codec,
+        steps=args.steps,
+        warmup_iters=args.warmup_iters,
+    )

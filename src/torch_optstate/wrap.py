@@ -28,12 +28,14 @@ class OptimizerWrapper(Optimizer):
         chunk_size: Optional[int] = None,
         initial_chunk_size: Optional[int] = None,
         pin_memory: Optional[bool] = None,
+        profile: bool = False,
     ):
         self.optimizer = optimizer
         self.policy = policy or WarmupPolicy()
         # Default to pinning when training on CUDA to make offload truly "plug and play".
         pin_flag = _auto_pin(self.optimizer.param_groups) if pin_memory is None else pin_memory
         self.store = StateStore(pin_memory=pin_flag)
+        self._profile = profile
 
         # Default chunking is small-but-safe; if unspecified we will derive a chunk size
         # once param mapping is known.
@@ -125,6 +127,7 @@ class OptimizerWrapper(Optimizer):
         total_materialize = 0.0
         total_step = 0.0
         total_commit = 0.0
+        profile_stats = self._init_profile_stats() if self._profile else None
         
         # 1. Backup all params
         all_original_params = [g['params'] for g in self.optimizer.param_groups]
@@ -145,7 +148,7 @@ class OptimizerWrapper(Optimizer):
                 # Materialize
                 chunk_pids = [self.param_to_id[p] for p in chunk_params]
                 chunk_devices = [p.device for p in chunk_params]
-                states = self.store.materialize_batch(chunk_pids, chunk_devices)
+                states = self.store.materialize_batch(chunk_pids, chunk_devices, stats=profile_stats)
                 
                 for param, state in zip(chunk_params, states):
                     if state:
@@ -171,7 +174,7 @@ class OptimizerWrapper(Optimizer):
                         if torch.is_tensor(step):
                             step = step.item()
                         codecs = self.policy.get_codecs(p, state, step)
-                        self.store.commit(self.param_to_id[p], state, codecs)
+                        self.store.commit(self.param_to_id[p], state, codecs, stats=profile_stats)
                 # Clear optimizer state for this chunk to free FP32 tensors
                 self.optimizer.state.clear()
                 
@@ -188,12 +191,30 @@ class OptimizerWrapper(Optimizer):
             
         self._global_step += 1
         
-        self.last_step_timings = {
+        timings = {
             'materialize': total_materialize,
             'step': total_step,
             'commit': total_commit,
             'overhead': 0.0 
         }
+        if profile_stats is not None:
+            encode = profile_stats["encode"]
+            decode = profile_stats["decode"]
+            timings.update({
+                "encode": encode["time_s"],
+                "decode": decode["time_s"],
+                "encode_tensors": encode["tensors"],
+                "decode_tensors": decode["tensors"],
+                "encode_bytes": encode["bytes"],
+                "decode_bytes": decode["bytes"],
+                "encode_elements": encode["elements"],
+                "decode_elements": decode["elements"],
+                "encode_by_codec": profile_stats["encode_by_codec"],
+                "decode_by_codec": profile_stats["decode_by_codec"],
+                "materialize_overhead": total_materialize - decode["time_s"],
+                "commit_overhead": total_commit - encode["time_s"],
+            })
+        self.last_step_timings = timings
         
         return None
 
@@ -254,7 +275,15 @@ class OptimizerWrapper(Optimizer):
     def __getattr__(self, name):
         return getattr(self.optimizer, name)
 
-def wrap(optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Optional[int] = None, initial_chunk_size: Optional[int] = None, pin_memory: bool = False) -> OptimizerWrapper:
+    def _init_profile_stats(self) -> Dict[str, Any]:
+        return {
+            "encode": {"time_s": 0.0, "tensors": 0, "bytes": 0, "elements": 0},
+            "decode": {"time_s": 0.0, "tensors": 0, "bytes": 0, "elements": 0},
+            "encode_by_codec": {},
+            "decode_by_codec": {},
+        }
+
+def wrap(optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Optional[int] = None, initial_chunk_size: Optional[int] = None, pin_memory: bool = False, profile: bool = False) -> OptimizerWrapper:
     """
     Wraps an existing PyTorch optimizer with state virtualization.
     
@@ -264,14 +293,15 @@ def wrap(optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Opti
         chunk_size: If set, performs step() in chunks of this size to reduce peak memory.
         initial_chunk_size: Optional smaller chunk size used only for the first step to reduce initial peak (defaults to 1).
         pin_memory: If True, pin CPU-stored compressed tensors to speed GPU transfers. If None, defaults to True when any parameter is on CUDA.
+        profile: If True, collects encode/decode timing stats in last_step_timings.
     
     Returns:
         An OptimizerWrapper instance.
     """
-    return OptimizerWrapper(optimizer, policy, chunk_size, initial_chunk_size, pin_memory)
+    return OptimizerWrapper(optimizer, policy, chunk_size, initial_chunk_size, pin_memory, profile)
 
 
-def auto_wrap(optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Optional[int] = None, initial_chunk_size: Optional[int] = None, pin_memory: Optional[bool] = None) -> OptimizerWrapper:
+def auto_wrap(optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Optional[int] = None, initial_chunk_size: Optional[int] = None, pin_memory: Optional[bool] = None, profile: bool = False) -> OptimizerWrapper:
     """
     Plug-and-play helper that applies sensible defaults:
     - Auto-chunking enabled (small first chunk to tame the initial peak).
@@ -283,4 +313,5 @@ def auto_wrap(optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size:
         chunk_size=chunk_size,
         initial_chunk_size=initial_chunk_size,
         pin_memory=pin_memory,
+        profile=profile,
     )

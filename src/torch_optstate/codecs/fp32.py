@@ -8,6 +8,9 @@ class CPUOffloadCodec(Codec):
     This is the default behavior for "FP32" in this library (offloading).
     """
     def encode(self, tensor: torch.Tensor) -> torch.Tensor:
+        # Avoid a copy when already FP32 on CPU.
+        if tensor.device.type == "cpu" and tensor.dtype == torch.float32:
+            return tensor.detach()
         # Ensure we store on CPU to save GPU memory
         return tensor.float().cpu()
 

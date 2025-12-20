@@ -1,3 +1,4 @@
+import time
 import torch
 from typing import Dict, Any, Optional, Union
 from ..codecs import Codec, FP32Codec
@@ -36,7 +37,7 @@ class StateStore:
                 state_dict[key] = packed
         return state_dict
 
-    def materialize_batch(self, param_ids: list[int], target_devices: list[torch.device]) -> list[Dict[str, Any]]:
+    def materialize_batch(self, param_ids: list[int], target_devices: list[torch.device], stats: Optional[Dict[str, Any]] = None) -> list[Dict[str, Any]]:
         """
         Batch version of materialize.
         """
@@ -62,19 +63,29 @@ class StateStore:
                     
         # Execute batch decodes
         for (codec, device), (packed_list, indices) in tasks.items():
+            t0 = time.perf_counter()
             decoded_list = codec.batch_decode(packed_list, device=device)
+            t1 = time.perf_counter()
+            if stats is not None:
+                elements = 0
+                for val in decoded_list:
+                    try:
+                        elements += val.numel()
+                    except Exception:
+                        pass
+                self._update_profile_stats(stats, "decode", codec, packed_list, t1 - t0, elements)
             for val, (idx, key) in zip(decoded_list, indices):
                 results[idx][key] = val
                 
         return results
 
-    def commit(self, param_id: int, state: Dict[str, Any], codecs: Dict[str, Codec]):
+    def commit(self, param_id: int, state: Dict[str, Any], codecs: Dict[str, Codec], stats: Optional[Dict[str, Any]] = None):
         """
         Compresses and stores the state dictionary for a parameter.
         """
-        self.commit_batch([param_id], [state], [codecs])
+        self.commit_batch([param_id], [state], [codecs], stats=stats)
 
-    def commit_batch(self, param_ids: list[int], states: list[Dict[str, Any]], codecs_list: list[Dict[str, Codec]]):
+    def commit_batch(self, param_ids: list[int], states: list[Dict[str, Any]], codecs_list: list[Dict[str, Codec]], stats: Optional[Dict[str, Any]] = None):
         """
         Batch version of commit.
         """
@@ -112,7 +123,17 @@ class StateStore:
 
         # Execute batch encodes
         for codec, (tensor_list, indices) in tasks.items():
+            t0 = time.perf_counter()
             packed_list = codec.batch_encode(tensor_list)
+            t1 = time.perf_counter()
+            if stats is not None:
+                elements = 0
+                for tensor in tensor_list:
+                    try:
+                        elements += tensor.numel()
+                    except Exception:
+                        pass
+                self._update_profile_stats(stats, "encode", codec, packed_list, t1 - t0, elements)
             for packed, (idx, key) in zip(packed_list, indices):
                 # Optionally pin CPU tensors to speed GPU transfers later
                 packed = self._maybe_pin(packed)
@@ -150,6 +171,37 @@ class StateStore:
         except Exception:
             return packed
         return packed
+
+    def _update_profile_stats(
+        self,
+        stats: Dict[str, Any],
+        section: str,
+        codec: Codec,
+        packed_list: list[Any],
+        elapsed_s: float,
+        elements: Optional[int] = None,
+    ) -> None:
+        base = stats.setdefault(section, {"time_s": 0.0, "tensors": 0, "bytes": 0, "elements": 0})
+        base["time_s"] += elapsed_s
+        base["tensors"] += len(packed_list)
+        bytes_total = 0
+        for packed in packed_list:
+            try:
+                bytes_total += codec.bytes(packed)
+            except Exception:
+                pass
+        base["bytes"] += bytes_total
+        if elements is not None:
+            base["elements"] += elements
+
+        by_codec = stats.setdefault(f"{section}_by_codec", {})
+        name = codec.__class__.__name__
+        entry = by_codec.setdefault(name, {"time_s": 0.0, "tensors": 0, "bytes": 0, "elements": 0})
+        entry["time_s"] += elapsed_s
+        entry["tensors"] += len(packed_list)
+        entry["bytes"] += bytes_total
+        if elements is not None:
+            entry["elements"] += elements
 
     def get_memory_usage(self) -> int:
         """
