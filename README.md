@@ -7,7 +7,7 @@ torch-optstate wraps existing PyTorch optimizers (Adam/AdamW/SGD) to virtualize 
 ## Why use this?
 
 - Optimizer state often costs 2–3× model params. Saving there unlocks larger batches/models.
-- Compress and offload momentum/variance to CPU while keeping training unchanged.
+- Compress and offload momentum/variance to CPU while keeping training unchanged (default minimizes VRAM).
 - Chunked step avoids double-residency spikes; pinned CPU offload keeps VRAM low.
 - Policy-driven: choose FP32/FP16/INT8 per-state with warmup or adaptive triggers.
 
@@ -20,7 +20,7 @@ torch-optstate wraps existing PyTorch optimizers (Adam/AdamW/SGD) to virtualize 
 6) Decode scratch cache: reuses decode buffers to reduce per-step allocations.  
 7) Chunk-only path: closures are not supported; keeps peak usage low.
 8) Small-tensor bypass: int8 compression skips tiny tensors by default (configurable via `WarmupPolicy`).
-9) CUDA path: device-resident compression auto-enables on CUDA; default policy keeps FP32 variance offloaded.
+9) CUDA path: compressed state is offloaded to CPU by default to minimize VRAM; set `device_resident=True` to keep it on GPU.
 10) Max-compression preset: `wrap_max_compression_adamw` for int8-all state with GPU-friendly chunking.
 
 ## Installation
@@ -41,7 +41,7 @@ model = torch.nn.Linear(10, 1).to("cuda")  # or cpu
 opt = AdamW(model.parameters(), lr=1e-3)
 
 # One call: auto chunking, tiny first chunk, auto pin if on CUDA
-# Default policy after warmup: int8 momentum + fp32 variance.
+# Default policy after warmup: int8 momentum + fp32 variance, offloaded to CPU.
 opt = topt.auto_wrap(opt)
 ```
 
@@ -55,6 +55,7 @@ opt = topt.wrap_low_memory_adamw(
     chunk_size=None,        # auto small chunk
     initial_chunk_size=None # defaults to 1
     # pin_memory None -> auto on CUDA
+    # device_resident=True, # keep compressed state on GPU instead of CPU offload
 )
 ```
 
@@ -66,6 +67,7 @@ opt = topt.wrap_max_compression_adamw(
     model.parameters(),
     chunk_size_on_cuda=256,  # defaults to 256 if chunk_size is None
     initial_chunk_size=1
+    # device_resident=True, # keep compressed state on GPU instead of CPU offload
 )
 ```
 
@@ -85,7 +87,8 @@ opt = wrap(opt, policy=policy, chunk_size=8, initial_chunk_size=1)
 ```
 
 ### 5) GPU offload (pinned CPU) and chunking
-- Offload is automatic; pinning is automatic on CUDA (override with `pin_memory`).
+- Offload is default (including after compression); pinning is automatic on CUDA (override with `pin_memory`).
+- Set `device_resident=True` if you want compressed state to stay on GPU instead.
 - Chunked step is always on; defaults are small to reduce VRAM overlap.
 
 Example CLI (demo) for GPU:
@@ -97,6 +100,32 @@ poetry run python examples/finetune_demo.py \
   --metrics_csv gpu_metrics.csv
 ```
 Generates `memory_comparison.png` with GPU VRAM and CPU RAM traces.
+
+## Default benchmark (example)
+From `results_default.csv` (46 steps, default compression):
+- Peak GPU allocated (`gpu_mem_mb`): 188.04 MB -> 102.65 MB (-85.39 MB, -45.4%)
+- Peak GPU peak (`gpu_peak_mb`): 319.31 MB -> 233.92 MB (-85.39 MB, -26.7%)
+- Peak CPU RSS (`cpu_mem_mb`): 1221.67 MB -> 1400.13 MB (+178.46 MB, +14.6%)
+- Peak tensor state (`tensor_mem_mb`): 85.00 MB -> 85.00 MB (+0.00 MB, +0.0%)
+
+These numbers reflect the expected trade-off: GPU memory drops while CPU memory rises due to offload.
+
+## Metrics glossary (CSV)
+- `run`: `baseline` or `optstate`.
+- `step`: Step index (1-based).
+- `loss`: Training loss for the step.
+- `accuracy`: Running training accuracy up to that step.
+- `val_accuracy`: Validation accuracy (filled after eval).
+- `step_time_ms`: Total wall-clock time per step.
+- `tensor_mem_mb`: Estimated optimizer state size (compressed + uncompressed) in MB.
+- `materialize_ms`: Time to decode and load optimizer state for the step.
+- `inner_step_ms`: Time spent inside the wrapped optimizer `step()`.
+- `commit_ms`: Time to compress and store optimizer state after the step.
+- `overhead_ms`: Extra time in the wrapper beyond materialize/step/commit.
+- `cpu_mem_mb`: Process RSS in MB.
+- `gpu_mem_mb`: Current allocated VRAM (post-step sample) in MB.
+- `gpu_peak_mb`: Peak allocated VRAM since last reset in MB.
+- `compression_active`: Whether compression is active for the step.
 
 ## How it works
 1. Virtualization: `OptimizerWrapper` intercepts `step()`.  

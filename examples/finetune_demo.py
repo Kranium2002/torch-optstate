@@ -438,7 +438,7 @@ def main():
     parser.add_argument('--auto_patience', type=int, default=5, help='Steps without loss improvement before enabling compression when auto_warmup is on')
     parser.add_argument('--auto_tol', type=float, default=1e-3, help='Minimum loss improvement to reset patience when auto_warmup is on')
     parser.add_argument('--pin_memory', action='store_true', help='Pin compressed CPU state to accelerate GPU transfers (otherwise auto-on when using CUDA).')
-    parser.add_argument('--device_resident', action='store_true', help='Keep compressed state on device (GPU) for speed; overrides CPU offload.')
+    parser.add_argument('--device_resident', action='store_true', help='Keep compressed state on device (GPU); overrides CPU offload.')
     parser.add_argument('--cpu_offload', action='store_true', help='Force CPU offload of compressed state even on CUDA.')
     args = parser.parse_args()
     

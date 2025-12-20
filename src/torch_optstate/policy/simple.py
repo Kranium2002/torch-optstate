@@ -15,7 +15,7 @@ class WarmupPolicy(Policy):
         min_int8_elements: Minimum tensor size to use int8; smaller tensors use small_tensor_codec.
         small_tensor_codec: Codec for tensors smaller than min_int8_elements (default: FP32).
         device_resident: If True, keep compressed state on the parameter device (e.g., CUDA).
-            If False, force CPU offload. If None, auto-enable on CUDA.
+            If False, force CPU offload. If None, default to CPU offload to minimize VRAM.
     """
     def __init__(
         self,
@@ -55,7 +55,7 @@ class WarmupPolicy(Policy):
 
     def _use_device_resident(self, device: torch.device) -> bool:
         if self.device_resident is None:
-            return device.type == "cuda"
+            return False
         return self.device_resident
 
     def _kind_for_codec(self, codec: Optional[Codec]) -> tuple[str, Optional[Codec]]:

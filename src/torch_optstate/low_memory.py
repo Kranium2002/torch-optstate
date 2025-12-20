@@ -69,7 +69,7 @@ def wrap_low_memory_adamw(
         min_int8_elements: Minimum elements to use INT8 for momentum/variance; smaller tensors use small_tensor_codec.
         small_tensor_codec: Codec for tensors smaller than min_int8_elements (defaults to FP32).
         device_resident: If True, keep compressed state on the parameter device (e.g., CUDA).
-            If False, force CPU offload. If None, auto-enable on CUDA.
+            If False, force CPU offload. If None, default to CPU offload to minimize VRAM.
         **adamw_kwargs: Passed through to torch.optim.AdamW.
     """
     base_opt = AdamW(params, lr=lr, weight_decay=weight_decay, **adamw_kwargs)
@@ -108,7 +108,7 @@ def wrap_max_compression_adamw(
 
     - Int8 momentum + int8 variance, no warmup.
     - min_int8_elements=0 (compress all tensors).
-    - On CUDA, uses device-resident compressed state unless device_resident=False.
+    - Defaults to CPU-offloaded compressed state; set device_resident=True to keep it on GPU.
     - chunk_size_on_cuda defaults to a larger value to keep step overhead reasonable.
     """
     base_opt = AdamW(params, lr=lr, weight_decay=weight_decay, **adamw_kwargs)
