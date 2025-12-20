@@ -85,11 +85,13 @@ class FP16Codec(Codec):
     """
     Stores tensors in FP16.
     """
-    def __init__(self):
+    def __init__(self, offload_to_cpu: bool = True):
         self._decode_cache = _TensorCache()
+        self._offload_to_cpu = offload_to_cpu
 
     def encode(self, tensor: torch.Tensor) -> torch.Tensor:
-        return tensor.half().cpu()
+        packed = tensor.half()
+        return packed.cpu() if self._offload_to_cpu else packed
 
     def decode(self, packed: torch.Tensor, device: torch.device = None) -> torch.Tensor:
         if device is not None:
@@ -105,11 +107,13 @@ class BF16Codec(Codec):
     """
     Stores tensors in BF16.
     """
-    def __init__(self):
+    def __init__(self, offload_to_cpu: bool = True):
         self._decode_cache = _TensorCache()
+        self._offload_to_cpu = offload_to_cpu
 
     def encode(self, tensor: torch.Tensor) -> torch.Tensor:
-        return tensor.bfloat16().cpu()
+        packed = tensor.bfloat16()
+        return packed.cpu() if self._offload_to_cpu else packed
 
     def decode(self, packed: torch.Tensor, device: torch.device = None) -> torch.Tensor:
         if device is not None:
@@ -125,12 +129,15 @@ class Int8MomentumCodec(Codec):
     """
     Compresses momentum to INT8 with per-tensor scaling.
     """
-    def __init__(self):
+    def __init__(self, offload_to_cpu: bool = True):
         self._decode_cache = _TensorCache()
+        self._offload_to_cpu = offload_to_cpu
 
     def encode(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         quantized, scale = _int8_encode(tensor)
-        return (quantized.cpu(), scale.cpu())
+        if self._offload_to_cpu:
+            return (quantized.cpu(), scale.cpu())
+        return (quantized, scale)
 
     def decode(self, packed: Tuple[torch.Tensor, torch.Tensor], device: torch.device = None) -> torch.Tensor:
         quantized, scale = packed

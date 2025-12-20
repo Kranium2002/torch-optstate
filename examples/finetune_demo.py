@@ -23,7 +23,7 @@ from torch_optstate.policy.simple import WarmupPolicy
 from torch_optstate.policy.auto import AdaptiveWarmupPolicy
 from torch_optstate.codecs import Int8MomentumCodec, FP32Codec, FP16Codec
 from torch_optstate.policy.base import Policy
-from torch_optstate.low_memory import wrap_low_memory_adamw
+from torch_optstate.low_memory import wrap_low_memory_adamw, wrap_max_compression_adamw
 from torch_optstate.utils import enable_gradient_checkpointing
 from benchmarks.models import TinyTransformer
 
@@ -414,6 +414,7 @@ def main():
     parser = argparse.ArgumentParser(description='Fine-tune demo with memory tracking')
     parser.add_argument('--steps', type=int, default=1, help='Number of steps to run')
     parser.add_argument('--chunk_size', type=int, default=None, help='Chunk size for Torch-OptState (number of tensors). If not set, uses an auto-chosen small chunk.')
+    parser.add_argument('--chunk_size_on_cuda', type=int, default=None, help='Chunk size to use on CUDA when --chunk_size is not set.')
     parser.add_argument('--initial_chunk_size', type=int, default=None, help='Optional smaller chunk size for the first step to lower initial peak memory (defaults internally to a tiny chunk).')
     parser.add_argument('--large_model', action='store_true', help='Use a large synthetic model to demonstrate scaling')
     parser.add_argument('--small_llm', action='store_true', help='Use a tiny Transformer (LLM-style) synthetic model')
@@ -425,28 +426,44 @@ def main():
     parser.add_argument(
         '--compression_mode',
         type=str,
-        default='default',
+        default='fp16_variance',
         choices=['default', 'fp16_variance', 'int8_variance', 'int8_all'],
         help='default: Int8 momentum, FP32 variance; fp16_variance: Int8 momentum + FP16 variance; int8_variance: Int8 momentum + Int8 variance; int8_all: same as int8_variance'
     )
+    parser.add_argument('--min_int8_elements', type=int, default=4096, help='Minimum tensor elements to use int8; smaller tensors use the small-tensor codec.')
+    parser.add_argument('--max_compression_fast', action='store_true', help='Force int8 for momentum+variance with no warmup and device-resident state on CUDA.')
     parser.add_argument('--metrics_csv', type=str, default='memory_metrics.csv', help='Path to save per-step metrics CSV')
     parser.add_argument('--val_split', type=float, default=0.1, help='Fraction of data to use for validation')
     parser.add_argument('--auto_warmup', action='store_true', help='Enable adaptive warmup: switch to compression when loss stops improving')
     parser.add_argument('--auto_patience', type=int, default=5, help='Steps without loss improvement before enabling compression when auto_warmup is on')
     parser.add_argument('--auto_tol', type=float, default=1e-3, help='Minimum loss improvement to reset patience when auto_warmup is on')
     parser.add_argument('--pin_memory', action='store_true', help='Pin compressed CPU state to accelerate GPU transfers (otherwise auto-on when using CUDA).')
+    parser.add_argument('--device_resident', action='store_true', help='Keep compressed state on device (GPU) for speed; overrides CPU offload.')
+    parser.add_argument('--cpu_offload', action='store_true', help='Force CPU offload of compressed state even on CUDA.')
     args = parser.parse_args()
     
+    compression_mode = args.compression_mode
+    min_int8_elements = args.min_int8_elements
+    chunk_size_on_cuda = args.chunk_size_on_cuda
+
     # Ensure warmup can actually complete within the run for short demos
     effective_warmup = min(args.warmup_steps, max(args.steps - 1, 0))
-    if effective_warmup != args.warmup_steps:
+    if args.max_compression_fast:
+        compression_mode = "int8_all"
+        min_int8_elements = 0
+        effective_warmup = 0
+        if chunk_size_on_cuda is None:
+            chunk_size_on_cuda = 256
+    elif effective_warmup != args.warmup_steps:
         print(f"Clamping warmup_steps from {args.warmup_steps} to {effective_warmup} so compression occurs within {args.steps} steps.")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     print(f"Running for {args.steps} steps with {args.optimizer}")
-    if args.chunk_size:
+    if args.chunk_size is not None:
         print(f"Using chunk size: {args.chunk_size}")
+    elif chunk_size_on_cuda is not None and device.type == "cuda":
+        print(f"Using CUDA chunk size: {chunk_size_on_cuda}")
     else:
         print("Using auto chunk size (small, chunked by default)")
     if args.large_model:
@@ -454,9 +471,20 @@ def main():
     if args.small_llm:
         print("Using Tiny Transformer (small LLM)")
     print(f"Warmup steps before int8 compression: {effective_warmup}")
-    print(f"Compression mode: {args.compression_mode}")
+    print(f"Compression mode: {compression_mode}")
+    print(f"min_int8_elements: {min_int8_elements}")
+    if args.max_compression_fast:
+        print("Max compression fast enabled: int8-all, warmup=0.")
     if args.auto_warmup:
         print(f"Auto warmup enabled (patience={args.auto_patience}, tol={args.auto_tol}). Compression will activate when loss plateaus.")
+    if args.device_resident and args.cpu_offload:
+        print("Both --device_resident and --cpu_offload were set; using device_resident.")
+
+    device_resident = None
+    if args.cpu_offload:
+        device_resident = False
+    elif args.device_resident or args.max_compression_fast:
+        device_resident = True
 
     # 1. Baseline Run
     print(f"\n--- Running Baseline ({args.optimizer.upper()}) ---")
@@ -493,9 +521,9 @@ def main():
     def optstate_factory(params):
         # Choose variance compression mode
         variance_mode = 'fp32'
-        if args.compression_mode == 'fp16_variance':
+        if compression_mode == 'fp16_variance':
             variance_mode = 'fp16'
-        elif args.compression_mode in ['int8_variance', 'int8_all']:
+        elif compression_mode in ['int8_variance', 'int8_all']:
             variance_mode = 'int8'
 
         if args.optimizer == 'sgd':
@@ -507,6 +535,8 @@ def main():
                     momentum_key='momentum_buffer',
                     variance_key='unused',
                     variance_codec=FP32Codec(),
+                    min_int8_elements=min_int8_elements,
+                    device_resident=device_resident,
                     patience=args.auto_patience,
                     tol=args.auto_tol,
                 )
@@ -516,16 +546,31 @@ def main():
                     momentum_key='momentum_buffer',
                     variance_key='unused',
                     variance_codec=FP32Codec(),
+                    min_int8_elements=min_int8_elements,
+                    device_resident=device_resident,
                 )
             return torch_optstate.auto_wrap(
                 base_opt,
                 policy=policy,
                 chunk_size=args.chunk_size,
+                chunk_size_on_cuda=chunk_size_on_cuda,
                 initial_chunk_size=args.initial_chunk_size,
                 pin_memory=args.pin_memory if args.pin_memory else None,
             )
 
         # AdamW path: use low-memory helper
+        if args.max_compression_fast:
+            return wrap_max_compression_adamw(
+                params,
+                lr=5e-5,
+                weight_decay=0.01,
+                chunk_size=args.chunk_size,
+                chunk_size_on_cuda=chunk_size_on_cuda,
+                initial_chunk_size=args.initial_chunk_size,
+                pin_memory=args.pin_memory if args.pin_memory else None,
+                device_resident=device_resident,
+            )
+
         return wrap_low_memory_adamw(
             params,
             lr=5e-5,
@@ -533,8 +578,11 @@ def main():
             warmup_steps=effective_warmup,
             variance_mode=variance_mode,
             chunk_size=args.chunk_size,
+            chunk_size_on_cuda=chunk_size_on_cuda,
             initial_chunk_size=args.initial_chunk_size,
             pin_memory=args.pin_memory if args.pin_memory else None,
+            min_int8_elements=min_int8_elements,
+            device_resident=device_resident,
         )
 
     # Clear memory before run

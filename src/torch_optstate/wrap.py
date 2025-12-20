@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any, Callable
 from .core.state_store import StateStore
 from .policy.base import Policy
 from .policy.simple import WarmupPolicy
+from .codecs import FP16Codec
 
 def _auto_pin(param_groups) -> bool:
     """
@@ -26,6 +27,7 @@ class OptimizerWrapper(Optimizer):
         optimizer: Optimizer,
         policy: Optional[Policy] = None,
         chunk_size: Optional[int] = None,
+        chunk_size_on_cuda: Optional[int] = None,
         initial_chunk_size: Optional[int] = None,
         pin_memory: Optional[bool] = None,
         profile: bool = False,
@@ -40,6 +42,7 @@ class OptimizerWrapper(Optimizer):
         # Default chunking is small-but-safe; if unspecified we will derive a chunk size
         # once param mapping is known.
         self.chunk_size = chunk_size
+        self.chunk_size_on_cuda = chunk_size_on_cuda
         # Optionally use a smaller chunk size for the first step to lower the initial peak.
         # If not provided, default to 1 to minimize the first-step peak.
         self.initial_chunk_size = 1 if initial_chunk_size is None else initial_chunk_size
@@ -112,6 +115,8 @@ class OptimizerWrapper(Optimizer):
             self._used_initial_chunk = True
         elif self.chunk_size is not None:
             effective_chunk = self.chunk_size
+        elif self.chunk_size_on_cuda is not None and _auto_pin(self.optimizer.param_groups):
+            effective_chunk = self.chunk_size_on_cuda
         else:
             total_params = len(self.param_to_id)
             # Use a small default to avoid large overlap on GPU; scale gently with param count.
@@ -283,7 +288,15 @@ class OptimizerWrapper(Optimizer):
             "decode_by_codec": {},
         }
 
-def wrap(optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Optional[int] = None, initial_chunk_size: Optional[int] = None, pin_memory: bool = False, profile: bool = False) -> OptimizerWrapper:
+def wrap(
+    optimizer: Optimizer,
+    policy: Optional[Policy] = None,
+    chunk_size: Optional[int] = None,
+    chunk_size_on_cuda: Optional[int] = None,
+    initial_chunk_size: Optional[int] = None,
+    pin_memory: bool = False,
+    profile: bool = False,
+) -> OptimizerWrapper:
     """
     Wraps an existing PyTorch optimizer with state virtualization.
     
@@ -291,6 +304,7 @@ def wrap(optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Opti
         optimizer: The optimizer to wrap.
         policy: The policy to use for state compression.
         chunk_size: If set, performs step() in chunks of this size to reduce peak memory.
+        chunk_size_on_cuda: If set and chunk_size is None, use this chunk size when parameters are on CUDA.
         initial_chunk_size: Optional smaller chunk size used only for the first step to reduce initial peak (defaults to 1).
         pin_memory: If True, pin CPU-stored compressed tensors to speed GPU transfers. If None, defaults to True when any parameter is on CUDA.
         profile: If True, collects encode/decode timing stats in last_step_timings.
@@ -298,19 +312,31 @@ def wrap(optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Opti
     Returns:
         An OptimizerWrapper instance.
     """
-    return OptimizerWrapper(optimizer, policy, chunk_size, initial_chunk_size, pin_memory, profile)
+    return OptimizerWrapper(optimizer, policy, chunk_size, chunk_size_on_cuda, initial_chunk_size, pin_memory, profile)
 
 
-def auto_wrap(optimizer: Optimizer, policy: Optional[Policy] = None, chunk_size: Optional[int] = None, initial_chunk_size: Optional[int] = None, pin_memory: Optional[bool] = None, profile: bool = False) -> OptimizerWrapper:
+def auto_wrap(
+    optimizer: Optimizer,
+    policy: Optional[Policy] = None,
+    chunk_size: Optional[int] = None,
+    chunk_size_on_cuda: Optional[int] = None,
+    initial_chunk_size: Optional[int] = None,
+    pin_memory: Optional[bool] = None,
+    profile: bool = False,
+) -> OptimizerWrapper:
     """
     Plug-and-play helper that applies sensible defaults:
     - Auto-chunking enabled (small first chunk to tame the initial peak).
     - Pinned CPU storage enabled when parameters are on CUDA.
     """
+    if policy is None and _auto_pin(optimizer.param_groups):
+        # On CUDA, prefer FP16 variance for better speed/memory balance.
+        policy = WarmupPolicy(variance_codec=FP16Codec())
     return OptimizerWrapper(
         optimizer,
         policy=policy,
         chunk_size=chunk_size,
+        chunk_size_on_cuda=chunk_size_on_cuda,
         initial_chunk_size=initial_chunk_size,
         pin_memory=pin_memory,
         profile=profile,

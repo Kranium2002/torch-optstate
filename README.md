@@ -20,6 +20,8 @@ torch-optstate wraps existing PyTorch optimizers (Adam/AdamW/SGD) to virtualize 
 6) Decode scratch cache: reuses decode buffers to reduce per-step allocations.  
 7) Chunk-only path: closures are not supported; keeps peak usage low.
 8) Small-tensor bypass: int8 compression skips tiny tensors by default to reduce overhead (configurable via `WarmupPolicy`).
+9) CUDA fast path: device-resident compression auto-enables on CUDA; `auto_wrap` uses FP16 variance for better speed/memory balance.
+10) Max-compression preset: `wrap_max_compression_adamw` for int8-all state with GPU-friendly chunking.
 
 ## Installation
 ```bash
@@ -55,7 +57,18 @@ opt = topt.wrap_low_memory_adamw(
 )
 ```
 
-### 3) Custom policies (int8 / FP16 / BF16)
+### 3) Max compression (int8-all, GPU-friendly)
+```python
+import torch_optstate as topt
+
+opt = topt.wrap_max_compression_adamw(
+    model.parameters(),
+    chunk_size_on_cuda=256,  # defaults to 256 if chunk_size is None
+    initial_chunk_size=1
+)
+```
+
+### 4) Custom policies (int8 / FP16 / BF16)
 ```python
 from torch_optstate import wrap, WarmupPolicy, FP16Codec, FP32Codec, Int8MomentumCodec
 
@@ -65,11 +78,12 @@ policy = WarmupPolicy(
     variance_key="exp_avg_sq",
     variance_codec=Int8MomentumCodec(),  # int8 variance
     # min_int8_elements=4096,  # default: skip int8 for tiny tensors
+    # device_resident=False,   # force CPU offload even on CUDA
 )
 opt = wrap(opt, policy=policy, chunk_size=8, initial_chunk_size=1)
 ```
 
-### 4) GPU offload (pinned CPU) and chunking
+### 5) GPU offload (pinned CPU) and chunking
 - Offload is automatic; pinning is automatic on CUDA (override with `pin_memory`).
 - Chunked step is always on; defaults are small to reduce VRAM overlap.
 
@@ -78,7 +92,7 @@ Example CLI (demo) for GPU:
 poetry run python examples/finetune_demo.py \
   --steps 10 \
   --small_llm \
-  --compression_mode int8_variance \
+  --max_compression_fast \
   --metrics_csv gpu_metrics.csv
 ```
 

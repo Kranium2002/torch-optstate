@@ -19,6 +19,7 @@ class AdaptiveWarmupPolicy(WarmupPolicy):
         variance_codec: Optional[Codec] = None,
         min_int8_elements: int = 4096,
         small_tensor_codec: Optional[Codec] = None,
+        device_resident: Optional[bool] = None,
         patience: int = 5,
         tol: float = 1e-3,
     ):
@@ -29,6 +30,7 @@ class AdaptiveWarmupPolicy(WarmupPolicy):
             variance_codec,
             min_int8_elements,
             small_tensor_codec,
+            device_resident,
         )
         self.patience = patience
         self.tol = tol
@@ -62,22 +64,42 @@ class AdaptiveWarmupPolicy(WarmupPolicy):
         # Default to FP32 for everything initially
         for key in state:
             if torch.is_tensor(state[key]):
-                codecs[key] = self.fp32_codec
+                codecs[key] = self._codec_for_kind("fp32", param.device, allow_fp32_device=False)
 
         if step >= effective_warmup:
             if self.momentum_key in state:
                 tensor = state[self.momentum_key]
                 if torch.is_tensor(tensor):
-                    codecs[self.momentum_key] = self._select_codec(tensor, self.int8_codec)
+                    kind = self._select_kind(tensor, "int8")
+                    codecs[self.momentum_key] = self._codec_for_kind(
+                        kind,
+                        param.device,
+                        self._small_custom,
+                        allow_fp32_device=True,
+                    )
 
             if "momentum_buffer" in state:
                 tensor = state["momentum_buffer"]
                 if torch.is_tensor(tensor):
-                    codecs["momentum_buffer"] = self._select_codec(tensor, self.int8_codec)
+                    kind = self._select_kind(tensor, "int8")
+                    codecs["momentum_buffer"] = self._codec_for_kind(
+                        kind,
+                        param.device,
+                        self._small_custom,
+                        allow_fp32_device=True,
+                    )
 
             if self.variance_key in state:
                 tensor = state[self.variance_key]
                 if torch.is_tensor(tensor):
-                    codecs[self.variance_key] = self._select_codec(tensor, self.variance_codec)
+                    kind = self._variance_kind
+                    if kind == "int8":
+                        kind = self._select_kind(tensor, kind)
+                    codecs[self.variance_key] = self._codec_for_kind(
+                        kind,
+                        param.device,
+                        self._variance_custom,
+                        allow_fp32_device=False,
+                    )
 
         return codecs
