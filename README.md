@@ -87,13 +87,13 @@ opt = wrap(opt, policy=policy, chunk_size=8, initial_chunk_size=1)
 ```
 
 ### 5) GPU offload (pinned CPU) and chunking
-- Offload is default (including after compression); pinning is automatic on CUDA (override with `pin_memory`).
+- Offload is default (including after compression); pinning is automatic on CUDA (override with `pin_memory=False`).
 - Set `device_resident=True` if you want compressed state to stay on GPU instead.
 - Chunked step is always on; defaults are small to reduce VRAM overlap.
 
 Example CLI (demo) for GPU:
 ```bash
-poetry run python examples/finetune_demo.py \
+poetry run python -m examples.finetune_demo \
   --steps 10 \
   --small_llm \
   --compression_mode default \

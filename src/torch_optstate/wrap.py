@@ -242,7 +242,7 @@ def wrap(
     chunk_size: Optional[int] = None,
     chunk_size_on_cuda: Optional[int] = None,
     initial_chunk_size: Optional[int] = None,
-    pin_memory: bool = False,
+    pin_memory: Optional[bool] = None,
     profile: bool = False,
 ) -> OptimizerWrapper:
     """
@@ -254,7 +254,7 @@ def wrap(
         chunk_size: If set, performs step() in chunks of this size to reduce peak memory.
         chunk_size_on_cuda: If set and chunk_size is None, use this chunk size when parameters are on CUDA.
         initial_chunk_size: Optional smaller chunk size used only for the first step to reduce initial peak (defaults to 1).
-        pin_memory: If True, pin CPU-stored compressed tensors to speed GPU transfers. If None, defaults to True when any parameter is on CUDA.
+        pin_memory: If True, pin CPU-stored compressed tensors to speed GPU transfers. If None (default), enable when any parameter is on CUDA.
         profile: If True, collects encode/decode timing stats in last_step_timings.
     
     Returns:
