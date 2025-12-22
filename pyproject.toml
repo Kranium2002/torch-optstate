@@ -1,6 +1,6 @@
 [project]
 name = "torch-optstate"
-version = "0.1.0"
+version = "0.1.1"
 description = "Optimizer state virtualization and compression for PyTorch"
 authors = [
     {name = "Vidhu Mathur", email = "vidhumathur2002@gmail.com"}
