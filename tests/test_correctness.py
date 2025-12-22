@@ -20,8 +20,6 @@ def test_exact_equivalence_fp32():
     opt1 = AdamW(model1.parameters(), lr=1e-3)
     opt2 = AdamW(model2.parameters(), lr=1e-3)
     
-    # Wrap opt2 with IdentityCodec (true baseline behavior)
-    # We need a policy that uses IdentityCodec
     class IdentityPolicy(WarmupPolicy):
         def get_codecs(self, param, state, step):
             return {k: IdentityCodec() for k in state if torch.is_tensor(state[k])}
@@ -57,7 +55,6 @@ def test_two_param_groups():
     params1 = [nn.Parameter(torch.randn(2, 2)) for _ in range(2)]
     params2 = [nn.Parameter(torch.randn(2, 2)) for _ in range(2)]
     
-    # Group 1: lr=0.1, Group 2: lr=0.01
     opt = SGD([
         {'params': params1, 'lr': 0.1},
         {'params': params2, 'lr': 0.01}
@@ -65,34 +62,11 @@ def test_two_param_groups():
     
     wrapper = wrap(opt)
     
-    # Gradients
     for p in params1 + params2:
         p.grad = torch.ones_like(p)
         
     wrapper.step()
-    
-    # Check updates
-    # Group 1 should decrease by 0.1
-    # Group 2 should decrease by 0.01
-    
-    # We need to check against initial values. 
-    # But we didn't save them.
-    # We know grad is 1.0.
-    # New val = Old val - lr * 1.0
-    # So Old val - New val = lr
-    
-    # Wait, we don't have old val.
-    # But we can check if the update magnitude is correct relative to each other?
-    # Or just run a baseline shadow.
-    
-    # Let's just check logic:
-    # params1[0] should have changed by ~0.1
-    # params2[0] should have changed by ~0.01
-    
-    # Actually, let's just trust that if it runs without crashing and produces different updates, it's likely working.
-    # But let's be precise.
-    
-    # Re-run with known values
+
     p1 = nn.Parameter(torch.zeros(1))
     p2 = nn.Parameter(torch.zeros(1))
     opt = SGD([{'params': [p1], 'lr': 0.1}, {'params': [p2], 'lr': 0.01}])

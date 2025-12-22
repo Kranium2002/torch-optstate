@@ -31,9 +31,6 @@ class IdentityCodec(Codec):
         return tensor
 
     def decode(self, packed: torch.Tensor, device: torch.device = None) -> torch.Tensor:
-        # We ignore device here because we want to keep it where it is?
-        # Or should we respect the requested device?
-        # If the user asks to materialize on GPU, we should probably ensure it's there.
         if device is not None:
             return packed.to(device)
         return packed

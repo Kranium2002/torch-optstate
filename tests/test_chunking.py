@@ -19,41 +19,25 @@ def test_chunking_mechanism():
     # With 10 parameters, we expect 10/2 = 5 chunks.
     wrapper = wrap(optimizer, chunk_size=2)
     
-    # Mock the underlying optimizer's step method
-    # We want to verify that when step() is called, the optimizer.param_groups 
-    # only contains chunk_size parameters.
-    
-    # We need to patch the instance method. 
-    # Since wrapper.optimizer is the instance, we patch that.
-    
     original_step = optimizer.step
     
-    # We'll use a list to record the number of params seen in each step call
     params_seen_per_step = []
     
     def mock_step(closure=None):
-        # Capture how many params are currently in the optimizer's groups
         count = 0
         for group in optimizer.param_groups:
             count += len(group['params'])
         params_seen_per_step.append(count)
-        # Call original just in case, though not strictly needed for this logic check
         return None 
 
-    # Replace the step method on the instance
     optimizer.step = mock_step
     
-    # Perform the step via wrapper
     wrapper.step()
     
-    # Restore (good practice, though test is ending)
     optimizer.step = original_step
     
-    # Assertions
-    # 1. Should be called 5 times (10 params / 2 chunk_size)
     assert len(params_seen_per_step) == 5
     
-    # 2. Each call should see exactly 2 parameters
     assert all(count == 2 for count in params_seen_per_step)
 
 def test_chunking_preserves_updates():

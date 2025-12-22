@@ -33,39 +33,25 @@ class OptimizerWrapper(Optimizer):
     ):
         self.optimizer = optimizer
         self.policy = policy or WarmupPolicy()
-        # Default to pinning when training on CUDA to make offload truly "plug and play".
         pin_flag = _auto_pin(self.optimizer.param_groups) if pin_memory is None else pin_memory
         self.store = StateStore(pin_memory=pin_flag)
         self._profile = profile
 
-        # Default chunking is small-but-safe; if unspecified we will derive a chunk size
-        # once param mapping is known.
         self.chunk_size = chunk_size
         self.chunk_size_on_cuda = chunk_size_on_cuda
-        # Optionally use a smaller chunk size for the first step to lower the initial peak.
-        # If not provided, default to 1 to minimize the first-step peak.
         self.initial_chunk_size = 1 if initial_chunk_size is None else initial_chunk_size
         self._used_initial_chunk = False
         
-        # We don't call super().__init__ because we are proxying.
-        # But we need to look like an Optimizer.
-        # We share param_groups with the underlying optimizer.
         self.param_groups = self.optimizer.param_groups
         self.defaults = self.optimizer.defaults
         self._global_step = 0
         
-        # Performance stats
         self.last_step_timings = {}
         
-        # Initialize param mapping
         self._update_param_mapping()
         
-        # Initialize state as empty, we will manage it via store
-        # But we need to sync with existing state if any
         if self.optimizer.state:
             for param, state in self.optimizer.state.items():
-                # Initial commit with default policy (likely FP32 or whatever policy says for step 0)
-                # We don't know the step here easily, assume 0 or extract from state
                 step = state.get('step', 0)
                 if torch.is_tensor(step):
                      step = step.item()
@@ -74,7 +60,6 @@ class OptimizerWrapper(Optimizer):
                 pid = self.param_to_id[param]
                 self.store.commit(pid, state, codecs)
             
-            # Clear original state to save memory
             self.optimizer.state.clear()
 
     def _update_param_mapping(self):
@@ -95,19 +80,12 @@ class OptimizerWrapper(Optimizer):
 
     @property
     def state(self):
-        # We return a view that looks like the state, but we shouldn't really expose it 
-        # directly for modification outside of step() if we want to keep consistency.
-        # However, for debugging/inspection, we might need to materialize.
-        # For now, let's return a proxy or just the underlying empty dict if we want to hide it.
-        # But PyTorch internals might access it.
-        # Let's return the optimizer's state dict, which we populate during step.
         return self.optimizer.state
 
     def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]:
         if closure is not None:
             raise NotImplementedError("Chunked stepping with closure is not supported.")
 
-        # Always use chunked path. If no chunk_size provided, choose a small default based on param count.
         effective_chunk = None
         if self.initial_chunk_size is not None and not self._used_initial_chunk:
             effective_chunk = self.initial_chunk_size
@@ -118,7 +96,6 @@ class OptimizerWrapper(Optimizer):
             effective_chunk = self.chunk_size_on_cuda
         else:
             total_params = len(self.param_to_id)
-            # Use a small default to avoid large overlap on GPU; scale gently with param count.
             effective_chunk = max(1, min(8, total_params))
 
         return self._step_chunked(effective_chunk)
@@ -133,14 +110,11 @@ class OptimizerWrapper(Optimizer):
         total_commit = 0.0
         profile_stats = self._init_profile_stats() if self._profile else None
         
-        # 1. Backup all params
         all_original_params = [g['params'] for g in self.optimizer.param_groups]
         
-        # 2. Empty all groups
         for g in self.optimizer.param_groups:
             g['params'] = []
             
-        # 3. Iterate and chunk
         for group_idx, group in enumerate(self.optimizer.param_groups):
             original_params = all_original_params[group_idx]
             
@@ -149,7 +123,6 @@ class OptimizerWrapper(Optimizer):
                 
                 t1 = time.perf_counter()
                 
-                # Materialize
                 chunk_pids = [self.param_to_id[p] for p in chunk_params]
                 chunk_devices = [p.device for p in chunk_params]
                 states = self.store.materialize_batch(chunk_pids, chunk_devices, stats=profile_stats)
@@ -161,16 +134,13 @@ class OptimizerWrapper(Optimizer):
                 t2 = time.perf_counter()
                 total_materialize += (t2 - t1)
                 
-                # Set params for this group
                 group['params'] = chunk_params
                 
-                # Step
                 self.optimizer.step()
                 
                 t3 = time.perf_counter()
                 total_step += (t3 - t2)
                 
-                # Commit: stream each param to avoid holding FP32 + compressed for many tensors
                 for p in chunk_params:
                     if p in self.optimizer.state:
                         state = self.optimizer.state[p]
@@ -179,17 +149,13 @@ class OptimizerWrapper(Optimizer):
                             step = step.item()
                         codecs = self.policy.get_codecs(p, state, step)
                         self.store.commit(self.param_to_id[p], state, codecs, stats=profile_stats)
-                # Clear optimizer state for this chunk to free FP32 tensors
                 self.optimizer.state.clear()
                 
                 t4 = time.perf_counter()
                 total_commit += (t4 - t3)
                 
-            # Restore params for this group (though we empty it again in next loop? No, we empty all at start)
-            # We can leave it empty for now and restore all at end.
             group['params'] = []
 
-        # 4. Restore all
         for group_idx, group in enumerate(self.optimizer.param_groups):
             group['params'] = all_original_params[group_idx]
             
@@ -226,18 +192,8 @@ class OptimizerWrapper(Optimizer):
         self.optimizer.zero_grad(set_to_none=set_to_none)
 
     def state_dict(self) -> Dict[str, Any]:
-        # Materialize everything to generate a standard state_dict
-        # We need to temporarily populate optimizer.state
-        
-        # Save current state of optimizer.state (should be empty)
         original_state = self.optimizer.state.copy()
         
-        # We need to map IDs back to params to populate optimizer.state
-        # But wait, StateStore uses IDs now.
-        # And optimizer.state uses params.
-        # We need to iterate over our params and materialize.
-        
-        # Also, we want to materialize on CPU for state_dict to avoid GPU OOM.
         cpu_device = torch.device('cpu')
         
         for group in self.param_groups:
@@ -246,23 +202,16 @@ class OptimizerWrapper(Optimizer):
                 if pid in self.store._store:
                     self.optimizer.state[p] = self.store.materialize(pid, target_device=cpu_device)
             
-        # Get state dict
         sd = self.optimizer.state_dict()
         
-        # Restore (clear)
         self.optimizer.state.clear()
         self.optimizer.state.update(original_state)
         
         return sd
 
     def load_state_dict(self, state_dict: Dict[str, Any]):
-        # Load into the underlying optimizer to parse params
-        # But wait, load_state_dict expects params to match.
-        # We can just call optimizer.load_state_dict, then steal the state.
-        
         self.optimizer.load_state_dict(state_dict)
         
-        # Now move everything to store
         for param, state in self.optimizer.state.items():
             step = state.get('step', 0)
             if torch.is_tensor(step):

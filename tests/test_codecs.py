@@ -43,7 +43,6 @@ def test_int8_momentum_codec():
     assert scale.dtype == tensor.dtype
     
     # Check error bounds. Int8 quantization error is roughly scale / 127 / 2
-    # But we can just check reasonable correlation or error
     error = (tensor - decoded).abs().max()
     max_val = tensor.abs().max()
     # Expected max error is roughly max_val / 127 * 0.5

@@ -15,7 +15,7 @@ class StateStore:
         #     state_key: (codec, packed_data)
         #   }
         # }
-        # We use stable IDs (int) as keys to ensure robustness across serialization.
+        # Stable integer IDs for serialization.
         self._store: Dict[int, Dict[str, Any]] = {}
         self._total_bytes = 0
         self._pin_memory = pin_memory

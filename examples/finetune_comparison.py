@@ -53,7 +53,6 @@ def train_model(
     model.train()
     
     # 2. Setup Data (Synthetic "Real-world" shape)
-    # We use synthetic data to avoid downloading large datasets, but it mimics real inputs
     seq_len = 128
     input_ids = torch.randint(0, 30522, (batch_size * steps, seq_len)).to(device)
     attention_mask = torch.ones((batch_size * steps, seq_len)).to(device)
