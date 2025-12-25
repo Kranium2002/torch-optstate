@@ -15,7 +15,7 @@ class Codec(ABC):
         pass
 
     @abstractmethod
-    def decode(self, packed: Any) -> torch.Tensor:
+    def decode(self, packed: Any, device: torch.device = None) -> torch.Tensor:
         """
         Decompresses a packed representation back into a tensor.
         """
@@ -27,11 +27,11 @@ class Codec(ABC):
         """
         return [self.encode(t) for t in tensors]
 
-    def batch_decode(self, packed_list: list[Any]) -> list[torch.Tensor]:
+    def batch_decode(self, packed_list: list[Any], device: torch.device = None) -> list[torch.Tensor]:
         """
         Decompresses a list of packed representations. Can be overridden for performance.
         """
-        return [self.decode(p) for p in packed_list]
+        return [self.decode(p, device=device) for p in packed_list]
 
     @abstractmethod
     def bytes(self, packed: Any) -> int:
