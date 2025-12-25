@@ -1,9 +1,7 @@
 import torch
-import torch.nn as nn
 from torch.optim import SGD, AdamW
 from torch_optstate import wrap
 import pytest
-from unittest.mock import MagicMock, patch
 
 def test_chunking_mechanism():
     """
@@ -15,9 +13,9 @@ def test_chunking_mechanism():
     # Initialize optimizer
     optimizer = SGD(params, lr=0.01)
     
-    # Wrap with chunk_size=2. 
+    # Wrap with chunk_size=2.
     # With 10 parameters, we expect 10/2 = 5 chunks.
-    wrapper = wrap(optimizer, chunk_size=2)
+    wrapper = wrap(optimizer, chunk_size=2, initial_chunk_size=2)
     
     original_step = optimizer.step
     

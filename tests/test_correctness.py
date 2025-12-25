@@ -3,7 +3,6 @@ import torch.nn as nn
 from torch.optim import AdamW, SGD
 from torch_optstate import wrap, WarmupPolicy
 from torch_optstate.codecs import IdentityCodec
-import pytest
 import copy
 
 def test_exact_equivalence_fp32():
@@ -123,12 +122,10 @@ def test_state_dict_round_trip():
         wrapper2.step()
         
     # Compare
-        for i, (p1, p2) in enumerate(zip(model.parameters(), model2.parameters())):
-            if not torch.allclose(p1, p2):
-                diff = (p1 - p2).abs().max().item()
-                print(f"Param {i} mismatch. Max diff: {diff}")
-                print(f"P1: {p1}")
-                print(f"P2: {p2}")
+    for i, (p1, p2) in enumerate(zip(model.parameters(), model2.parameters())):
+        if not torch.allclose(p1, p2, atol=1e-6, rtol=1e-6):
+            diff = (p1 - p2).abs().max().item()
+            raise AssertionError(f"Param {i} mismatch. Max diff: {diff}")
 
 def test_chunk_size_invariance():
     """

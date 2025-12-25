@@ -85,6 +85,7 @@ class FP16Codec(Codec):
         if device is not None:
             packed = packed.to(device)
         out = self._decode_cache.get(packed.shape, packed.device, torch.float32)
+        # Reuse decode buffers; copy into the cached tensor.
         out.copy_(packed.float())
         return out
 

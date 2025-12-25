@@ -1,5 +1,8 @@
 import torch
 import time
+import copy
+from collections import defaultdict
+from itertools import chain
 from torch.optim import Optimizer
 from typing import Optional, Dict, Any, Callable
 from .core.state_store import StateStore
@@ -121,7 +124,7 @@ class OptimizerWrapper(Optimizer):
             for i in range(0, len(original_params), chunk_size):
                 chunk_params = original_params[i : i + chunk_size]
                 
-                t1 = time.perf_counter()
+                t0 = time.perf_counter()
                 
                 chunk_pids = [self.param_to_id[p] for p in chunk_params]
                 chunk_devices = [p.device for p in chunk_params]
@@ -131,15 +134,15 @@ class OptimizerWrapper(Optimizer):
                     if state:
                         self.optimizer.state[param] = state
                 
-                t2 = time.perf_counter()
-                total_materialize += (t2 - t1)
+                t1 = time.perf_counter()
+                total_materialize += (t1 - t0)
                 
                 group['params'] = chunk_params
                 
                 self.optimizer.step()
                 
-                t3 = time.perf_counter()
-                total_step += (t3 - t2)
+                t2 = time.perf_counter()
+                total_step += (t2 - t1)
                 
                 for p in chunk_params:
                     if p in self.optimizer.state:
@@ -151,8 +154,8 @@ class OptimizerWrapper(Optimizer):
                         self.store.commit(self.param_to_id[p], state, codecs, stats=profile_stats)
                 self.optimizer.state.clear()
                 
-                t4 = time.perf_counter()
-                total_commit += (t4 - t3)
+                t3 = time.perf_counter()
+                total_commit += (t3 - t2)
                 
             group['params'] = []
 
@@ -203,6 +206,10 @@ class OptimizerWrapper(Optimizer):
                     self.optimizer.state[p] = self.store.materialize(pid, target_device=cpu_device)
             
         sd = self.optimizer.state_dict()
+        sd["optstate_meta"] = {
+            "global_step": self._global_step,
+            "used_initial_chunk": self._used_initial_chunk,
+        }
         
         self.optimizer.state.clear()
         self.optimizer.state.update(original_state)
@@ -210,7 +217,12 @@ class OptimizerWrapper(Optimizer):
         return sd
 
     def load_state_dict(self, state_dict: Dict[str, Any]):
-        self.optimizer.load_state_dict(state_dict)
+        state = dict(state_dict)
+        meta = state.pop("optstate_meta", None)
+        self._load_optimizer_state_dict(state)
+        if isinstance(meta, dict):
+            self._global_step = meta.get("global_step", self._global_step)
+            self._used_initial_chunk = meta.get("used_initial_chunk", self._used_initial_chunk)
         
         for param, state in self.optimizer.state.items():
             step = state.get('step', 0)
@@ -221,6 +233,82 @@ class OptimizerWrapper(Optimizer):
             self.store.commit(pid, state, codecs)
             
         self.optimizer.state.clear()
+
+    def _load_optimizer_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """
+        Custom state_dict loader that preserves optimizer state exactly.
+        Avoids the tiny numeric drift seen with Optimizer.load_state_dict on CPU.
+        """
+        state_dict = state_dict.copy()
+        groups = self.optimizer.param_groups
+        saved_groups = copy.deepcopy(state_dict["param_groups"])
+
+        if len(groups) != len(saved_groups):
+            raise ValueError(
+                "loaded state dict has a different number of parameter groups"
+            )
+
+        param_lens = (len(g["params"]) for g in groups)
+        saved_lens = (len(g["params"]) for g in saved_groups)
+        if any(p_len != s_len for p_len, s_len in zip(param_lens, saved_lens)):
+            raise ValueError(
+                "loaded state dict contains a parameter group "
+                "that doesn't match the size of optimizer's group"
+            )
+
+        id_map = dict(
+            zip(
+                chain.from_iterable(g["params"] for g in saved_groups),
+                chain.from_iterable(g["params"] for g in groups),
+            )
+        )
+
+        def _cast(param, value, param_id=None, param_groups=None, key=None):
+            if isinstance(value, torch.Tensor):
+                # Bypass PyTorch's policy logic to ensure bitwise exactness
+                # when devices match, avoiding potential casting drift.
+                if param.device == value.device and param.dtype == value.dtype:
+                    return value.clone()
+                return Optimizer._process_value_according_to_param_policy(
+                    param, value, param_id, param_groups, key
+                )
+            if isinstance(value, dict):
+                return {
+                    k: _cast(
+                        param, v, param_id=param_id, param_groups=param_groups, key=k
+                    )
+                    for k, v in value.items()
+                }
+            if isinstance(value, (list, tuple)):
+                return type(value)(
+                    _cast(param, v, param_id=param_id, param_groups=param_groups)
+                    for v in value
+                )
+            return value
+
+        state = defaultdict(dict)
+        for k, v in state_dict["state"].items():
+            if k in id_map:
+                param = id_map[k]
+                state[param] = _cast(
+                    param,
+                    copy.deepcopy(v),
+                    param_id=k,
+                    param_groups=state_dict["param_groups"],
+                )
+            else:
+                state[k] = copy.deepcopy(v)
+
+        def update_group(group, new_group):
+            new_group["params"] = group["params"]
+            if "param_names" in group and "param_names" not in new_group:
+                new_group["param_names"] = group["param_names"]
+            return new_group
+
+        self.optimizer.param_groups = [
+            update_group(g, ng) for g, ng in zip(groups, saved_groups)
+        ]
+        self.optimizer.state = state
 
     def __repr__(self):
         return f"OptimizerWrapper({repr(self.optimizer)})"
