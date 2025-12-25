@@ -27,6 +27,8 @@ torch-optstate wraps existing PyTorch optimizers (Adam/AdamW/SGD) to virtualize 
 ```bash
 pip install torch-optstate
 ```
+Optional (Linux): `pip install torch-optstate[triton]` to enable `torch.compile` acceleration.
+
 (Research preview.)
 
 ## Usage
@@ -102,11 +104,11 @@ poetry run python -m examples.finetune_demo \
 Generates `memory_comparison.png` with GPU VRAM and CPU RAM traces.
 
 ## Default benchmark (example)
-From `results.csv` (46 steps, default compression):
-- Peak GPU allocated (`gpu_mem_mb`): 188.04 MB -> 134.00 MB (-54.04 MB, -28.7%)
-- Peak GPU peak (`gpu_peak_mb`): 319.31 MB -> 265.27 MB (-54.04 MB, -16.9%)
-- Peak CPU RSS (`cpu_mem_mb`): 1220.49 MB -> 1364.05 MB (+143.56 MB, +11.8%)
-- Peak tensor state (`tensor_mem_mb`): 85.00 MB -> 53.20 MB (-31.80 MB, -37.4%)
+From `gpu_metrics.csv` (10 steps, `small_11m`, default compression):
+- Peak GPU allocated (`gpu_mem_mb`): 2074.91 MB -> 1116.60 MB (-958.32 MB, -46.2%)
+- Peak GPU peak (`gpu_peak_mb`): 4715.73 MB -> 3755.91 MB (-959.82 MB, -20.4%)
+- Peak CPU RSS (`cpu_mem_mb`): 1698.05 MB -> 2582.95 MB (+884.90 MB, +52.1%)
+- Peak tensor state (`tensor_mem_mb`): 1023.24 MB -> 640.89 MB (-382.35 MB, -37.4%)
 
 These numbers reflect the expected trade-off: GPU memory drops while CPU memory rises due to offload.
 
